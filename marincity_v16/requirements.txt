@@ -8,3 +8,4 @@ tabulate
 joblib
 streamlit
 plotly
+openpyxl
