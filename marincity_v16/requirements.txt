@@ -1,0 +1,10 @@
+numpy
+pandas
+scipy>=1.7
+scikit-learn
+matplotlib
+pyyaml
+tabulate
+joblib
+streamlit
+plotly

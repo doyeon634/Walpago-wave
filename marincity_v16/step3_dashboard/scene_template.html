@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>마린시티 호안 월파 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1722; overflow: hidden; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }
+  #c { width: 100%; height: 100%; display: block; }
+  .hud { position: absolute; color: #e6edf3; background: rgba(15, 23, 34, .82); border: 1px solid #2a3a4d; border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.5; z-index: 3; }
+  #info { left: 10px; top: 10px; max-width: 300px; }
+  #ov { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+  #labels { position: absolute; left: 0; top: 0; z-index: 2; }
+  #info .g { display: inline-block; padding: 0 8px; border-radius: 4px; color: #fff; font-weight: 700; font-size: 13px; }
+  #info b { font-variant-numeric: tabular-nums; }
+  #info .muted { color: #93a4b5; font-size: 12px; }
+  #ctrl { right: 10px; top: 10px; display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; max-width: 330px; }
+  #ctrl button { background: #172231; color: #e6edf3; border: 1px solid #2a3a4d; border-radius: 5px; padding: 4px 9px; font: inherit; cursor: pointer; }
+  #ctrl button.on { background: #4fa3d9; border-color: #4fa3d9; color: #0f1722; }
+  #event { right: 10px; bottom: 10px; max-width: 330px; }
+  #note { left: 10px; bottom: 10px; font-size: 11px; color: #93a4b5; max-width: 380px; padding: 5px 9px; }
+  .lab { position: absolute; color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none;
+         background: rgba(15, 23, 34, .72); border-radius: 4px; padding: 2px 7px; border-left: 3px solid #93a4b5; }
+  .lab.bad { border-left-color: #e5534b; } .lab.ok { border-left-color: #3fb68b; }
+  .lab.rise { border-left-color: #ffffff; font-weight: 700; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info" class="hud"></div>
+<div id="ctrl" class="hud" style="padding:8px">
+  <button id="play" class="on">일시정지</button>
+  <button data-speed="1">1배</button><button data-speed="2" class="on">2배</button><button data-speed="4">4배</button>
+  <button id="big">가장 큰 파도 보기</button>
+  <button data-view="road" class="on">도로에서</button><button data-view="side">옆에서</button><button data-view="oblique">비스듬히</button><button data-view="walk">보행로에서</button>
+</div>
+<div id="event" class="hud"></div>
+<div id="note" class="hud"></div>
+<canvas id="ov"></canvas>
+<div id="labels"></div>
+<script>/*__THREE__*/</script>
+<script>/*__ORBIT__*/</script>
+<script>
+const P = /*__PARAMS__*/;
+const G = 9.81;
+
+// ---------------------------------------------------------------- 기본
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.outputEncoding = THREE.sRGBEncoding;
+const scene = new THREE.Scene();
+const SKY = new THREE.Color(0xa7b0b8);
+scene.fog = new THREE.Fog(SKY, 70, 420);
+const camera = new THREE.PerspectiveCamera(42, 1, 0.5, 2000);
+const controls = new THREE.OrbitControls(camera, canvas);
+controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
+
+// 하늘 (위아래 그라데이션)
+{
+  const g = new THREE.SphereGeometry(900, 32, 16);
+  const m = new THREE.ShaderMaterial({ side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { top: { value: new THREE.Color(0x4d5d6e) }, bot: { value: SKY } },
+    vertexShader: 'varying float h; void main(){ h = normalize(position).y; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }',
+    fragmentShader: 'uniform vec3 top; uniform vec3 bot; varying float h; void main(){ gl_FragColor = vec4(mix(bot, top, smoothstep(-0.05, 0.5, h)), 1.); }' });
+  scene.add(new THREE.Mesh(g, m));
+}
+scene.add(new THREE.HemisphereLight(0xc8d4e0, 0x4a4436, 0.75));
+const sun = new THREE.DirectionalLight(0xfff2e0, 1.15);
+sun.position.set(-60, 90, 50); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -60, right: 60, top: 50, bottom: -50, near: 10, far: 260 });
+scene.add(sun);
+
+// ---------------------------------------------------------------- 치수
+const L = 60, Z0 = -L / 2;
+const crest = P.crest, swl = P.swl, toe = P.toe, ac = P.ac, ground = P.ground, pw = P.pw, cot = P.cot;
+const B = P.berm;                                 // TTP 마루 폭 (직립벽 앞 수평 구간)
+const xToe = -B - (ac - toe) * cot;
+const walk0 = P.buffer_w + P.gap, walk1 = walk0 + P.walk_w, road1 = walk1 + P.road_w, bld0 = road1 + P.setback;
+const slopeX = y => -B - (ac - y) * cot;        // 사면 위 높이 y의 x 좌표
+const slopeLen = Math.hypot(xToe + B, ac - toe);
+const nrm = new THREE.Vector3(-1, cot, 0).normalize();   // 사면 바깥쪽 법선 (x-y 평면)
+
+function canvasTex(w, h, draw, rx = 1, ry = 1) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry);
+  t.anisotropy = 8; t.encoding = THREE.sRGBEncoding; return t;
+}
+function noise(ctx, w, h, base, amp, n = 9000) {
+  ctx.fillStyle = base; ctx.fillRect(0, 0, w, h);
+  for (let i = 0; i < n; i++) { const v = (Math.random() - .5) * amp; ctx.fillStyle = `rgba(${v > 0 ? 255 : 0},${v > 0 ? 255 : 0},${v > 0 ? 255 : 0},${Math.abs(v)})`; ctx.fillRect(Math.random() * w, Math.random() * h, 2, 2); }
+}
+const concreteTex = canvasTex(256, 256, (c, w, h) => noise(c, w, h, '#a9aeaf', .12), 6, 6);
+const mat = {
+  concrete: new THREE.MeshStandardMaterial({ map: concreteTex, roughness: .9 }),
+  ttp: new THREE.MeshStandardMaterial({ color: 0xc9c6bd, map: concreteTex, roughness: .85 }),
+  rubble: new THREE.MeshStandardMaterial({ color: 0x6d675d, roughness: 1 }),
+  seabed: new THREE.MeshStandardMaterial({ color: 0x8a7d62, roughness: 1 }),
+  steel: new THREE.MeshStandardMaterial({ color: 0x3a444c, roughness: .5, metalness: .6 }),
+};
+function box(x0, x1, y0, y1, material, z0 = Z0, z1 = Z0 + L, shadow = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0), material);
+  m.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2); m.receiveShadow = true; m.castShadow = shadow; scene.add(m); return m;
+}
+
+// ---------------------------------------------------------------- 해저와 사석 코어
+{
+  const sea = new THREE.Mesh(new THREE.PlaneGeometry(700, 500), mat.seabed);
+  sea.rotation.x = -Math.PI / 2; sea.position.set(xToe - 350, toe, 0); scene.add(sea);
+  const shape = new THREE.Shape(); shape.moveTo(xToe, toe); shape.lineTo(0, toe); shape.lineTo(0, ac); shape.lineTo(-B, ac); shape.lineTo(xToe, toe);
+  const coreTex = canvasTex(256, 256, (c, w, h) => { c.fillStyle = '#5f594f'; c.fillRect(0, 0, w, h);
+    for (let i = 0; i < 900; i++) { const l = 30 + Math.random() * 30; c.fillStyle = `hsl(35,7%,${l}%)`; c.beginPath(); c.ellipse(Math.random() * w, Math.random() * h, 3 + Math.random() * 6, 2 + Math.random() * 5, Math.random() * 3, 0, 7); c.fill(); } }, 4, 4);
+  const core = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false }),
+    new THREE.MeshStandardMaterial({ map: coreTex, roughness: 1 }));                       // 기초사석 (작은 돌)
+  core.position.z = Z0; core.receiveShadow = true; scene.add(core);
+  // 피복석 (큰 돌): TTP 바로 아래에 빈틈 없이 깔림
+  const rock = new THREE.IcosahedronGeometry(1, 0), rr = mulberry(31), rockPts = [];
+  const sLen = Math.hypot(xToe + B, ac - toe), nx0 = -1 / Math.hypot(1, cot), ny0 = cot / Math.hypot(1, cot);
+  for (let s2 = 0.7; s2 < sLen; s2 += 1.3) for (let z = Z0 + 0.6; z < Z0 + L; z += 1.3) {
+    const t2 = s2 / sLen, x = xToe + (-B - xToe) * t2, y = toe + (ac - toe) * t2;
+    for (const d of [-0.35]) rockPts.push([x + nx0 * d + (rr() - .5) * .3, y + ny0 * d + (rr() - .5) * .3, z + (rr() - .5) * .4]);
+  }
+  for (let x = -B + 0.5; x < -0.2; x += 1.3) for (let z = Z0 + 0.6; z < Z0 + L; z += 1.3) for (const d of [-0.35]) rockPts.push([x + (rr() - .5) * .3, ac + d, z + (rr() - .5) * .4]);
+  const rocks = new THREE.InstancedMesh(rock, new THREE.MeshStandardMaterial({ color: 0x77736b, roughness: 0.95, flatShading: true }), rockPts.length);
+  const m4r = new THREE.Matrix4(), qr = new THREE.Quaternion(), er = new THREE.Euler();
+  rockPts.forEach((p3, i) => { er.set(rr() * 6, rr() * 6, rr() * 6); qr.setFromEuler(er); const sc = 0.55 + rr() * 0.25;
+    m4r.compose(new THREE.Vector3(...p3), qr, new THREE.Vector3(sc, sc * 0.8, sc)); rocks.setMatrixAt(i, m4r); });
+  rocks.receiveShadow = true; scene.add(rocks);
+}
+
+// ---------------------------------------------------------------- TTP (테트라포드) 2층
+function tetrapodGeometry(H) {
+  const parts = [];
+  const arm = H * 0.5, r0 = H * 0.19, r1 = H * 0.12;
+  const dirs = [[0, 1, 0], [0.9428, -0.3333, 0], [-0.4714, -0.3333, 0.8165], [-0.4714, -0.3333, -0.8165]];
+  for (const d of dirs) {
+    const g = new THREE.CylinderGeometry(r1, r0, arm, 10, 1); g.translate(0, arm / 2, 0);
+    g.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...d))));
+    parts.push(g.toNonIndexed());
+  }
+  parts.push(new THREE.SphereGeometry(r0 * 1.05, 12, 8).toNonIndexed());
+  let n = 0; parts.forEach(p => n += p.attributes.position.count);
+  const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3); let o = 0;
+  for (const p of parts) { pos.set(p.attributes.position.array, o * 3); nor.set(p.attributes.normal.array, o * 3); o += p.attributes.position.count; }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  return g;
+}
+{
+  const H = P.ttp_h, sp = P.dn * 0.9, rnd = mulberry(7);   // TTP 를 촘촘히 (빈틈 줄임)
+  const pts = [];
+  for (let layer = 0; layer < 2; layer++)
+    for (let s = sp * 0.5; s < slopeLen - 0.3; s += sp)
+      for (let z = Z0 + sp * 0.5; z < Z0 + L; z += sp) {
+        const t = s / slopeLen, x = xToe + (-B - xToe) * t, y = toe + (ac - toe) * t;
+        const off = (layer + 0.55) * H * 0.42;
+        pts.push([x + nrm.x * off + (rnd() - .5) * sp * .5, y + nrm.y * off + (rnd() - .5) * .4, z + (layer ? sp / 2 : 0) + (rnd() - .5) * sp * .5]);
+      }
+  for (let layer = 0; layer < 2; layer++)                       // TTP 마루(수평 구간)
+    for (let x = -B + sp * 0.5; x < -0.4; x += sp)
+      for (let z = Z0 + sp * 0.5; z < Z0 + L; z += sp)
+        pts.push([x + (rnd() - .5) * 0.5, ac - H * 0.35 + layer * H * 0.42 + (rnd() - .5) * .3, z + (layer ? sp / 2 : 0) + (rnd() - .5) * sp * .5]);
+  const inst = new THREE.InstancedMesh(tetrapodGeometry(H), mat.ttp, pts.length);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+  pts.forEach((p, i) => { e.set(rnd() * 6.28, rnd() * 6.28, rnd() * 6.28); q.setFromEuler(e); m4.compose(new THREE.Vector3(...p), q, new THREE.Vector3(1, 1, 1)); inst.setMatrixAt(i, m4); });
+  inst.castShadow = inst.receiveShadow = true; scene.add(inst);
+}
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---------------------------------------------------------------- 파라펫, 차수벽, 배후지
+box(0, 10.0, toe, ground, mat.concrete);                       // 기존 구조물 (콘크리트, TTP 마루 위로 드러난 면이 직립벽)
+box(0, pw, ground - 0.02, P.crest_parapet, mat.concrete);      // 2012년 방파벽 1.2 m
+const gradeMat = new THREE.MeshBasicMaterial({ color: P.grade_color, toneMapped: false, fog: false });   // 조명·안개에 흐려지지 않는 진한 색
+const gradeBase = new THREE.Color(P.grade_color), gradeHi = new THREE.Color(P.grade_color).lerp(new THREE.Color('#ffffff'), 0.35);
+const gradeStrip = box(-0.06, pw + 0.06, ground + 0.02, P.crest_parapet + 0.08, gradeMat, Z0, Z0 + L, false);   // 호안 꼭대기(방파벽 1.2 m 전체) = 위험 등급 색
+const gradeCapMat = new THREE.MeshBasicMaterial({ color: P.grade_color, toneMapped: false, fog: false, depthTest: false, transparent: true, opacity: 1 });   // 물보라보다 나중에 그려짐
+const gradeCap = box(-0.15, pw + 0.15, P.crest_parapet + 0.06, P.crest_parapet + 0.26, gradeCapMat, Z0, Z0 + L, false);
+gradeCap.renderOrder = 10;   // 꼭대기 윗선은 물보라에 가려도 보이게
+box(0, bld0 + 70, toe - 2, ground - 0.02, new THREE.MeshStandardMaterial({ color: 0x5b5346, roughness: 1 }), Z0, Z0 + L, false);
+const paveTex = canvasTex(256, 256, (c, w, h) => { noise(c, w, h, '#9b9d9b', .1); c.strokeStyle = 'rgba(60,60,60,.35)'; for (let i = 0; i <= 4; i++) { c.beginPath(); c.moveTo(i * w / 4, 0); c.lineTo(i * w / 4, h); c.stroke(); c.beginPath(); c.moveTo(0, i * h / 4); c.lineTo(w, i * h / 4); c.stroke(); } }, 2, 12);
+const walkTex = canvasTex(512, 512, (c, w, h) => { c.fillStyle = '#c9cccd'; c.fillRect(0, 0, w, h); c.lineWidth = 34;
+  for (let i = -4; i < 10; i++) { c.strokeStyle = i % 2 ? '#6e7479' : '#a7acaf'; c.beginPath(); for (let y = 0; y <= h; y += 8) { const x = i * 60 + 40 * Math.sin(y / 70); y ? c.lineTo(x, y) : c.moveTo(x, y); } c.stroke(); } }, 1, 6);
+const roadTex = canvasTex(512, 512, (c, w, h) => { noise(c, w, h, '#3b3e42', .08, 14000); c.fillStyle = '#d9b43a'; c.fillRect(w / 2 - 10, 0, 7, h); c.fillRect(w / 2 + 3, 0, 7, h);
+  c.fillStyle = '#e8e8e8'; for (const x of [w * .25, w * .75]) for (let y = 0; y < h; y += 128) c.fillRect(x - 3, y, 6, 64); }, 1, 4);
+function slab(x0, x1, tex, rough = .9) { const m = box(x0, x1, ground - 0.02, ground + 0.03, new THREE.MeshStandardMaterial({ map: tex, roughness: rough }), Z0, Z0 + L, false); return m; }
+slab(pw, P.buffer_w, paveTex); slab(P.buffer_w, walk0, paveTex); slab(walk0, walk1, walkTex); slab(walk1, road1, roadTex, .75); slab(road1, bld0 + 70, paveTex);
+box(walk1 - 0.25, walk1, ground, ground + 0.18, mat.concrete);          // 연석
+for (let z = Z0 + 6; z < Z0 + L; z += 15) { box(walk0 + 0.3, walk0 + 0.5, ground, ground + 7, mat.steel, z, z + 0.2); box(walk0 + 0.3, walk0 + 2.0, ground + 7, ground + 7.15, mat.steel, z, z + 0.2); }
+
+// 마린시티 고층 건물
+{
+  const winTex = canvasTex(256, 512, (c, w, h) => { c.fillStyle = '#2b3846'; c.fillRect(0, 0, w, h);
+    for (let y = 6; y < h; y += 16) for (let x = 6; x < w; x += 20) { const l = Math.random(); c.fillStyle = l > .8 ? '#e9d79a' : l > .45 ? '#6f8496' : '#3f5263'; c.fillRect(x, y, 13, 9); } }, 1, 1);
+  const towers = [[bld0, -20, 12, 40, 9], [bld0, 24, 12, 36, 12], [bld0 + 22, -10, 16, 22, 140], [bld0 + 26, 30, 15, 22, 175], [bld0 + 20, -48, 16, 20, 110], [bld0 + 55, 6, 18, 26, 210], [bld0 + 52, -36, 15, 20, 95]];
+  for (const [x, z, dx, dz, h] of towers) {
+    const t = winTex.clone(); t.needsUpdate = true; t.repeat.set(Math.max(1, dx / 8), h / 22);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(dx, h, dz), new THREE.MeshStandardMaterial({ map: t, roughness: .35, metalness: .3 }));
+    m.position.set(x + dx / 2, ground + h / 2, z); m.castShadow = true; m.receiveShadow = true; scene.add(m);
+  }
+}
+
+// ---------------------------------------------------------------- 바다 (개별 파도 높이가 다른 진행파)
+const NW = 64, rnd = mulberry(20261028);
+const U = [], HRATIO = [];   // 파도별 난수와 파고비
+for (let i = 0; i < NW; i++) { const u = Math.max(rnd(), 1e-4); U.push(u); HRATIO.push(Math.sqrt(-Math.log(u) / 2)); }
+const k = 2 * Math.PI / P.Lw, w = 2 * Math.PI / P.tm;
+const xShore = slopeX(swl);
+const seaMat = new THREE.ShaderMaterial({
+  uniforms: { t: { value: 0 }, amp: { value: HRATIO }, A0: { value: P.hs / 2 }, k: { value: k }, w: { value: w }, swl: { value: swl },
+              xs: { value: xShore }, cr: { value: ac }, uRun: { value: swl }, uB: { value: B }, uCot: { value: cot }, uCrest: { value: crest }, sunDir: { value: sun.position.clone().normalize() }, fogColor: { value: SKY }, fogNear: { value: 70 }, fogFar: { value: 420 } },
+  vertexShader: `
+    uniform float t, A0, k, w, swl, xs, cr, uRun, uB, uCot, uCrest; uniform float amp[${NW}];
+    varying vec3 vP; varying float vFoam; varying vec3 vN;
+    float surf(vec2 p){
+      float th = w*t - k*p.x; float n = floor(th/6.2831853 + 0.5); float ph = th - n*6.2831853;
+      int i = int(mod(n, ${NW}.0)); float a = A0 * amp[i];
+      float near = clamp(1.0 - (xs - p.x)/60.0, 0.0, 1.0);          // 해안에 가까울수록 앞면이 가팔라짐
+      float sk = ph + near*0.9*sin(ph);
+      float h = a * cos(sk) * (1.0 + 0.35*near);                     // 실제 파고 그대로 (임의로 낮추지 않음)
+      // 사면 위: 바다 면이 그대로 이어져 TTP 를 타고 올라감 (처오름). 따로 떠 있는 판 없음
+      float sTop = p.x < -uB ? cr + (p.x + uB) / uCot : cr;                  // 피복 표면 높이
+      float yDry = sTop - 0.6;                                             // 물이 없는 곳은 피복 아래로 숨김
+      float yRun = yDry;
+      if (uRun > sTop) {
+        yRun = sTop + (uRun - sTop) * 0.45;                                // 물 앞머리로 갈수록 얇아짐
+        if (p.x > -1.5 && uRun > cr) yRun = max(yRun, cr + (min(uRun, uCrest) - cr) * pow((p.x + 1.5) / 1.5, 1.5));   // 직립벽에 부딪혀 벽을 타고 오름
+      }
+      float wv = smoothstep(xs - 4.0, xs + 4.0, p.x);
+      h = mix(h, max(yRun, min(swl + h, yDry)) - swl, wv);
+      h += 0.22*sin(0.31*p.x + 0.23*p.y - 1.7*t) + 0.14*sin(0.53*p.y - 0.41*p.x - 2.3*t) + 0.08*sin(1.1*p.x + 0.9*p.y - 3.1*t);
+      return h;
+    }
+    void main(){
+      vec3 p = position; vec2 xz = vec2(p.x, -p.y);
+      float h = surf(vec2(modelMatrix[3].x + p.x, -p.y));
+      vec3 wp = (modelMatrix * vec4(p, 1.)).xyz; wp.y = swl + h;
+      float e = 0.6;
+      float hx = surf(vec2(wp.x + e, wp.z)) - surf(vec2(wp.x - e, wp.z));
+      float hz = surf(vec2(wp.x, wp.z + e)) - surf(vec2(wp.x, wp.z - e));
+      vN = normalize(vec3(-hx / (2.0*e), 1.0, -hz / (2.0*e)));
+      float steep = clamp(length(vec2(hx, hz)) / (2.0*e) * 2.5, 0.0, 1.0);
+      vP = wp; vFoam = smoothstep(0.45, 1.0, h / max(A0, 0.1)) * (0.4 + 0.6*steep) + smoothstep(-8.0, 2.0, wp.x - xs) * 0.55 * smoothstep(0.0, 1.0, h + 0.3);
+      gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+    }`,
+  fragmentShader: `
+    uniform vec3 sunDir, fogColor; uniform float fogNear, fogFar; uniform float t; varying vec3 vP; varying float vFoam; varying vec3 vN;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+      return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
+    float fbm(vec2 p){ float a = 0.5, s = 0.0; for (int k = 0; k < 4; k++) { s += a*vnoise(p); p *= 2.03; a *= 0.5; } return s; }
+    void main(){
+      vec3 n = normalize(vN + vec3(fbm(vP.xz*0.35 + t*0.15) - 0.5, 0.0, fbm(vP.zx*0.35 - t*0.12) - 0.5) * 0.18);
+      vec3 v = normalize(cameraPosition - vP);
+      float fr = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+      vec3 deep = vec3(0.10, 0.17, 0.18), shallow = vec3(0.22, 0.32, 0.32), sky = vec3(0.66, 0.70, 0.73);
+      vec3 col = mix(deep, shallow, clamp((1.0 - n.y)*4.0, 0.0, 1.0));
+      col = mix(col, sky, fr*0.6);
+      float nz = fbm(vP.xz*0.6 + vec2(t*0.4, -t*0.2));
+      float spec = pow(max(dot(reflect(-sunDir, n), v), 0.0), 80.0);
+      col += spec * 0.6;
+      float foam = clamp(vFoam * smoothstep(0.25, 0.75, nz + vFoam*0.35), 0.0, 1.0);
+      col = mix(col, vec3(0.90, 0.93, 0.94), foam * 0.92);
+      float d = length(cameraPosition - vP);
+      col = mix(col, fogColor, smoothstep(fogNear, fogFar, d));
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+  extensions: { derivatives: true },
+});
+{
+  const xEnd = 0.0;   // 바다 면을 파라펫 앞까지 (사면 아래에 있는 부분은 사면에 가려짐)
+  const g = new THREE.PlaneGeometry(520, 420, 560, 240);
+  const sea = new THREE.Mesh(g, seaMat); sea.rotation.x = -Math.PI / 2; sea.position.set(xEnd - 260, 0, 0); scene.add(sea);
+}
+
+// ---------------------------------------------------------------- 파도 사건 (처오름 · 솟구침 · 덮침)
+// 파도 n의 처오름 R = Ru2% · sqrt(ln u / ln 0.02)  (레일리 분포, EurOtop 식 6.3)
+//   → R이 여유고보다 클 확률이 곧 대시보드의 '넘어오는 파도 비율'(식 6.3)과 같다.
+// 마루를 넘는 파도의 월파량 V = a · (−ln p)^(1/b)  (EurOtop 식 6.16~6.18, p = u / Pov)
+function waveOf(n) {
+  const u = U[((n % NW) + NW) % NW];
+  let R = P.ru2 * Math.sqrt(Math.log(u) / Math.log(0.02));
+  if (!P.overtop) R = Math.min(R, crest - swl - 0.15);            // 평균 월파량이 0 이면 넘치지 않게
+  const ex = swl + R - crest;
+  const V = ex > 0 ? P.wa * Math.pow(-Math.log(Math.min(u / P.pov, 0.9999)), 1 / P.wb) : 0;   // m³ per m
+  return { R, ex, V };
+}
+const tShore = n => (2 * Math.PI * n + k * xShore) / w;     // 파도 n의 마루가 해안선에 닿는 시각
+const TR = Math.min(0.45 * P.tm, 7);                         // 처오름 지속 시간
+
+// 처오름 막 (사면 위 흰 물거품)
+const foamTex = canvasTex(256, 256, (c, w, h) => { c.fillStyle = '#e8f1f5'; c.fillRect(0, 0, w, h); for (let i = 0; i < 2500; i++) { c.fillStyle = `rgba(150,180,195,${Math.random() * .5})`; c.beginPath(); c.arc(Math.random() * w, Math.random() * h, Math.random() * 6, 0, 7); c.fill(); } }, 3, 3);
+const runupGeo = new THREE.PlaneGeometry(1, L, 30, 120);
+const runupMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, uniforms: { t: { value: 0 } },
+  vertexShader: `uniform float t; varying vec2 vUv; varying float vH;
+    void main(){ vUv = uv; vec3 p = position;
+      float jag = 0.06*sin(p.y*0.9 + t*2.0) + 0.04*sin(p.y*2.3 - t*3.0);          // 물 앞머리의 들쭉날쭉함
+      float edge = smoothstep(0.85, 1.0, uv.x);
+      p.x -= edge * (0.5 + 0.5*sin(p.y*0.7 + t)) * 0.08;
+      vH = 0.35*sin(p.y*1.7 + uv.x*9.0 - t*4.0) + 0.25*sin(p.y*0.6 - t*2.0) + jag*4.0;
+      p.z += vH * (0.4 + 0.8*edge);
+      gl_Position = projectionMatrix*modelViewMatrix*vec4(p,1.); }`,
+  fragmentShader: `uniform float t; varying vec2 vUv; varying float vH;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    void main(){ float front = smoothstep(0.55, 1.0, vUv.x); float n = 0.5 + 0.5*sin(vUv.y*180.0 + t*3.0)*sin(vUv.x*25.0 - t*5.0);
+      vec3 water = vec3(0.58, 0.68, 0.70); vec3 foam = vec3(0.94, 0.96, 0.97);
+      vec3 col = mix(water, foam, clamp(front*0.9 + n*0.35 + vH*0.4, 0., 1.));
+      gl_FragColor = vec4(col, 0.6 + 0.35*front); }` });
+const runup = new THREE.Mesh(runupGeo, runupMat); runup.visible = false;
+scene.add(runup);
+const wallWater = new THREE.Mesh(new THREE.BoxGeometry(1, 1, L), runupMat); wallWater.visible = false; scene.add(wallWater);
+function setRunup(level) {
+  seaMat.uniforms.uRun.value = level; runup.visible = false; wallWater.visible = false; return;   // v10: 처오름은 바다 면이 직접 올라감
+  const lv = Math.min(level, crest + 0.2);
+  if (lv > ac + 0.05) {                                          // TTP 마루를 넘으면 직립벽 앞에 물이 차오르며 벽을 타고 오름
+    wallWater.visible = true; wallWater.scale.set(B + 0.6, lv - ac + 0.4, 1); wallWater.position.set(-(B + 0.6) / 2, (ac + lv) / 2 + 0.2, 0);
+  } else wallWater.visible = false;
+  const top = Math.min(level, ac), s0 = swl;
+  if (top <= s0 + 0.05) { runup.visible = false; return; }
+  runup.visible = true;
+  const xa = slopeX(s0), xb = slopeX(top), off = P.ttp_h * 1.25;
+  const len = Math.hypot(xb - xa, top - s0);
+  runup.scale.set(len, 1, 1);
+  runup.position.set((xa + xb) / 2 + nrm.x * off, (s0 + top) / 2 + nrm.y * off, 0);
+  runup.rotation.set(-Math.PI / 2, 0, 0); runup.rotateOnWorldAxis(new THREE.Vector3(0, 0, 1), Math.atan2(top - s0, xb - xa));
+}
+
+// 덮치는 물 덩어리 (마루를 넘어 날아가는 물 몸통)
+const tongueMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  uniforms: { t: { value: 0 }, opacity: { value: 1 }, sunDir: { value: sun.position.clone().normalize() } },
+  vertexShader: 'varying vec3 vP; varying vec3 vN; void main(){ vP = (modelMatrix*vec4(position,1.)).xyz; vN = normalize(normalMatrix*normal); gl_Position = projectionMatrix*viewMatrix*vec4(vP,1.); }',
+  fragmentShader: `uniform float t, opacity; uniform vec3 sunDir; varying vec3 vP; varying vec3 vN;
+    float hash(vec3 p){ return fract(sin(dot(p, vec3(12.9898,78.233,37.719)))*43758.5453); }
+    void main(){ vec3 n = normalize(cross(dFdx(vP), dFdy(vP))); vec3 v = normalize(cameraPosition - vP);
+      float fr = pow(1.0 - abs(dot(n, v)), 2.0);
+      float foam = (0.5 + 0.5*sin(vP.z*2.3 + t*7.0)*sin(vP.y*3.1 - t*5.0)) * 0.55 + fr*0.6;
+      vec3 col = mix(vec3(0.33, 0.56, 0.63), vec3(0.94, 0.97, 0.98), clamp(foam, 0., 1.));
+      col *= 0.75 + 0.35*max(dot(n, sunDir), 0.);
+      gl_FragColor = vec4(col, opacity * (0.62 + 0.3*fr)); }`,
+  extensions: { derivatives: true } });
+const NU = 36, NZ = 40;
+const tongueGeo = new THREE.BufferGeometry();
+{
+  const pos = new Float32Array(NU * 2 * NZ * 3), idx = [];
+  for (let iz = 0; iz < NZ - 1; iz++) for (let iu = 0; iu < NU - 1; iu++) for (let s = 0; s < 2; s++) {
+    const a = (iz * NU + iu) * 2 + s, b = a + 2, c = a + NU * 2, d = c + 2; idx.push(a, b, c, b, d, c);
+  }
+  for (let iz = 0; iz < NZ; iz++) { const a = iz * NU * 2, c = a + NU * 2 - 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  tongueGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); tongueGeo.setIndex(idx);
+}
+const tongue = new THREE.Mesh(tongueGeo, tongueMat); tongue.frustumCulled = false; tongue.visible = false; scene.add(tongue);
+function setTongue(ev, prog, fade) {
+  tongue.visible = false; return;            // v9: 물 덩어리는 입자로 그림
+  if (!ev || prog <= 0 || fade <= 0) { tongue.visible = false; return; }
+  tongue.visible = true; tongueMat.uniforms.opacity.value = fade; tongueMat.uniforms.t.value = t;
+  const pos = tongueGeo.attributes.position.array;
+  const apexY = crest + ev.rise, land = pw + ev.d50, th = Math.max(0.5, 0.3 * ev.ex) * (0.4 + 0.6 * fade);
+  for (let iz = 0; iz < NZ; iz++) {
+    const z = Z0 + L * iz / (NZ - 1), wob = 1 + 0.25 * Math.sin(z * 0.37 + ev.seed) * Math.sin(z * 0.11 + 2 * ev.seed);
+    for (let iu = 0; iu < NU; iu++) {
+      const t = prog * iu / (NU - 1);
+      const x = -1.0 + t * (land + 1.0) * wob;
+      const yb = (1 - t) * (1 - t) * crest + 2 * (1 - t) * t * (2 * apexY - (crest + ground) / 2) + t * t * ground;
+      const thick = th * (1 - 0.65 * t) * Math.sin(Math.PI * Math.min(1, iu / (NU - 1) * 1.15 + 0.05));
+      const o = (iz * NU + iu) * 6;
+      pos[o] = x; pos[o + 1] = yb + thick; pos[o + 2] = z; pos[o + 3] = x + thick * 0.4; pos[o + 4] = yb - thick * 0.3; pos[o + 5] = z;
+    }
+  }
+  tongueGeo.attributes.position.needsUpdate = true; tongueGeo.computeVertexNormals();
+}
+
+// 물보라 입자 — 0: 물 덩어리(땅에 떨어져 물이 됨) · 1: 물보라(하얗게 피어오름) · 2: 물안개(넓게 퍼지며 사라짐)
+const NP = 16000;
+const pGeo = new THREE.BufferGeometry();
+const pPos = new Float32Array(NP * 3), pVel = new Float32Array(NP * 3), pLife = new Float32Array(NP), pVol = new Float32Array(NP);
+const pType = new Uint8Array(NP), pAge = new Float32Array(NP), pMax = new Float32Array(NP), pS0 = new Float32Array(NP);
+const aSize = new Float32Array(NP), aAlpha = new Float32Array(NP);
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('aSize', new THREE.BufferAttribute(aSize, 1));
+pGeo.setAttribute('aAlpha', new THREE.BufferAttribute(aAlpha, 1));
+const sprayMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { uScale: { value: 400 }, uT: { value: 0 }, fogColor: { value: SKY }, fogNear: { value: 70 }, fogFar: { value: 420 } },
+  vertexShader: `attribute float aSize; attribute float aAlpha; uniform float uScale; varying float vA; varying float vD; varying float vSeed;
+    void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
+      gl_PointSize = aSize * uScale / max(-mv.z, 0.5); vA = aAlpha; vD = -mv.z; vSeed = fract(position.x * 12.9898 + position.z * 78.233); }`,
+  fragmentShader: `uniform vec3 fogColor; uniform float fogNear, fogFar; varying float vA; varying float vD; varying float vSeed;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+      return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
+    void main(){ vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0;
+      float edge = 0.75 + 0.25 * vnoise(c * 6.0 + vSeed * 20.0);           // 뭉게뭉게한 가장자리
+      if (r > edge) discard;
+      float soft = smoothstep(edge, edge * 0.25, r);
+      float shade = 0.80 + 0.20 * (1.0 - gl_PointCoord.y) + 0.06 * vnoise(c * 9.0 + vSeed * 7.0);   // 위쪽이 밝은 덩어리감
+      vec3 col = vec3(0.93, 0.95, 0.96) * shade;
+      col = mix(col, fogColor, smoothstep(fogNear, fogFar, vD) * 0.8);
+      gl_FragColor = vec4(col, soft * vA); }`,
+});
+const pts = new THREE.Points(pGeo, sprayMat);
+pts.frustumCulled = false; pts.renderOrder = 5; scene.add(pts);
+for (let i = 0; i < NP; i++) { pLife[i] = 0; pPos[i * 3 + 1] = -999; }
+let pNext = 0;
+function spawn(type, x, y, z, vx, vy, vz, life, size, vol) {
+  const i = pNext; pNext = (pNext + 1) % NP;
+  pPos[i * 3] = x; pPos[i * 3 + 1] = y; pPos[i * 3 + 2] = z;
+  pVel[i * 3] = vx; pVel[i * 3 + 1] = vy; pVel[i * 3 + 2] = vz;
+  pType[i] = type; pAge[i] = 0; pMax[i] = life; pS0[i] = size; pVol[i] = vol || 0; pLife[i] = 1;
+}
+function emit(n, xs, ys, vxFn, vy, vol) {           // 물 덩어리 (땅에 떨어지면 물이 됨)
+  for (let j = 0; j < n; j++) {
+    const v = vxFn();
+    spawn(0, xs + (Math.random() - .5) * 1.5, ys + Math.random() * 0.6, Z0 + Math.random() * L, v[0], v[1], (Math.random() - .5) * 1.2,
+          6, 1.0 + Math.random() * 1.4, vol);
+  }
+}
+// 파도가 부딪힐 때의 물보라 (높이 = 계산된 처오름·솟구침 높이)
+//   'slope': TTP 표면을 따라 위로 밀려 오름 · 'wall': 직립벽 면을 타고 오름 · 'over': 마루를 넘어감
+//   (TTP 사이 틈에서 위로 뿜어 나오는 모양이 생기지 않게 시작점은 항상 물 표면)
+function plume(mode, y0, height, strength) {
+  const nS = Math.round((mode === 'slope' ? 700 : 1100) * strength), nM = Math.round(160 * strength);
+  const v0 = Math.sqrt(2 * G * Math.max(height, 0.3));
+  const ux = cot / Math.hypot(1, cot), uy = 1 / Math.hypot(1, cot);              // 사면 위쪽 방향
+  for (let j = 0; j < nS; j++) {
+    const z = Z0 + Math.random() * L;
+    if (mode === 'slope') {
+      const y = y0 + (Math.random() - 0.7) * 1.0, x = slopeX(y) + nrm.x * P.ttp_h * 1.1;
+      const sp = v0 / uy * (0.75 + 0.25 * Math.random());
+      spawn(1, x, y + nrm.y * P.ttp_h * 1.1, z, sp * ux * 0.6, sp * uy, (Math.random() - .5) * 1.2, 1.3 + Math.random() * 1.0, 1.4 + Math.random() * 1.6, 0);
+    } else {
+      const y = y0 + Math.random() * 0.6;
+      spawn(1, -0.35 - Math.random() * 0.8, y, z, -0.6 + Math.random() * 1.6, v0 * (0.8 + 0.2 * Math.random()), (Math.random() - .5) * 1.2,
+            1.4 + Math.random() * 1.2, 1.5 + Math.random() * 1.8, 0);
+    }
+  }
+  for (let j = 0; j < nM; j++) {
+    const z = Z0 + Math.random() * L, y = y0 + Math.random() * height * 0.7;
+    spawn(2, (mode === 'slope' ? slopeX(Math.min(y, ac)) : -0.6) + Math.random() * 2, y, z, 1 + Math.random() * 2, v0 * 0.2 * Math.random(), (Math.random() - .5) * 1.2,
+          3 + Math.random() * 2, 3.5 + Math.random() * 3.5, 0);
+  }
+}
+function updateParticles(dt) {
+  const wind = 3.0;                                  // 바다 → 육지 바람 (물보라·물안개만 밀림)
+  for (let i = 0; i < NP; i++) {
+    if (pLife[i] <= 0) { aAlpha[i] = 0; continue; }
+    const o = i * 3, ty = pType[i];
+    pAge[i] += dt; const f = pAge[i] / pMax[i];
+    if (f >= 1) { pLife[i] = 0; pPos[o + 1] = -999; aAlpha[i] = 0; continue; }
+    if (ty === 0) {
+      pVel[o + 1] -= G * dt;
+      aSize[i] = pS0[i] * (1 + 0.4 * f); aAlpha[i] = 0.92;
+    } else if (ty === 1) {
+      const drag = Math.exp(-1.1 * dt);
+      pVel[o] = pVel[o] * drag + wind * (1 - drag); pVel[o + 1] = pVel[o + 1] * drag - G * 0.75 * dt; pVel[o + 2] *= drag;
+      aSize[i] = pS0[i] * (1 + 2.2 * f); aAlpha[i] = 0.85 * Math.pow(1 - f, 1.3);
+    } else {
+      const drag = Math.exp(-1.8 * dt);
+      pVel[o] = pVel[o] * drag + wind * 1.3 * (1 - drag); pVel[o + 1] = pVel[o + 1] * drag + 0.4 * dt; pVel[o + 2] *= drag;
+      aSize[i] = pS0[i] * (1 + 2.5 * f); aAlpha[i] = 0.32 * Math.pow(1 - f, 1.1);
+    }
+    pPos[o] += pVel[o] * dt; pPos[o + 1] += pVel[o + 1] * dt; pPos[o + 2] += pVel[o + 2] * dt;
+    const floorY = pPos[o] > 0 ? ground : -99;
+    if (ty === 0) {
+      if (pPos[o + 1] <= ground && pPos[o] > pw) { if (pVol[i] > 0) deposit(pPos[o], pPos[o + 2], pVol[i]); pLife[i] = 0; pPos[o + 1] = -999; aAlpha[i] = 0; }
+      else if (pPos[o + 1] <= P.crest_parapet && pPos[o] > -0.2 && pPos[o] <= pw && pVel[o + 1] < 0) { if (pVol[i] > 0) deposit(pw + 0.1, pPos[o + 2], pVol[i]); pLife[i] = 0; pPos[o + 1] = -999; aAlpha[i] = 0; }
+      else if (pPos[o + 1] < swl - 3) { pLife[i] = 0; pPos[o + 1] = -999; aAlpha[i] = 0; }
+    } else if (pPos[o + 1] < floorY + 0.3) { pPos[o + 1] = floorY + 0.3; pVel[o + 1] = Math.abs(pVel[o + 1]) * 0.2; }
+  }
+  pGeo.attributes.position.needsUpdate = true; pGeo.attributes.aSize.needsUpdate = true; pGeo.attributes.aAlpha.needsUpdate = true;
+}
+
+// 땅 위를 흐르는 물 (얕은 물 높이장)
+const GX = 110, GZ = 90, gx0 = pw, gx1 = bld0, gdx = (gx1 - gx0) / GX, gdz = L / GZ;
+const depth = new Float32Array(GX * GZ), tmp = new Float32Array(GX * GZ);
+const wGeo = new THREE.PlaneGeometry(gx1 - gx0, L, GX - 1, GZ - 1);
+wGeo.rotateX(-Math.PI / 2); wGeo.translate((gx0 + gx1) / 2, ground + 0.04, 0);
+const wDepth = new Float32Array(GX * GZ); wGeo.setAttribute('depth', new THREE.BufferAttribute(wDepth, 1));
+const baseY = wGeo.attributes.position.array.slice();
+const waterMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { sunDir: { value: sun.position.clone().normalize() } },
+  vertexShader: 'attribute float depth; varying float d; varying vec3 vP; void main(){ d = depth; vP = (modelMatrix*vec4(position,1.)).xyz; gl_Position = projectionMatrix*viewMatrix*vec4(vP,1.); }',
+  fragmentShader: `uniform vec3 sunDir; varying float d; varying vec3 vP;
+    void main(){ if (d < 0.004) discard;
+      vec3 n = normalize(cross(dFdx(vP), dFdy(vP))); if (n.y < 0.) n = -n; vec3 v = normalize(cameraPosition - vP);
+      vec3 col = mix(vec3(0.75,0.86,0.9), vec3(0.18,0.42,0.55), smoothstep(0.02, 0.6, d));
+      col += pow(max(dot(reflect(-sunDir, n), v), 0.), 60.) * 0.5;
+      float foam = smoothstep(0.35, 0.95, 1.0 - n.y) ; col = mix(col, vec3(0.95), foam*0.7);
+      gl_FragColor = vec4(col, smoothstep(0.004, 0.05, d) * 0.85); }`,
+  extensions: { derivatives: true },
+});
+const waterMesh = new THREE.Mesh(wGeo, waterMat); waterMesh.frustumCulled = false; scene.add(waterMesh);
+let flowU = 0;
+function deposit(x, z, vol) {
+  const i = Math.floor((x - gx0) / gdx), j = Math.floor((z - Z0) / gdz);
+  if (i < 0 || i >= GX || j < 0 || j >= GZ) return;
+  depth[j * GX + i] += vol / (gdx * gdz);
+}
+function stepWater(dt) {
+  const n = Math.max(1, Math.ceil(flowU * dt / (0.7 * gdx)));
+  const h = dt / n;
+  for (let s = 0; s < n; s++) {
+    tmp.fill(0);
+    for (let j = 0; j < GZ; j++) for (let i = 0; i < GX; i++) {
+      const id = j * GX + i, d = depth[id]; if (d <= 0) continue;
+      const u = flowU * Math.exp(-1.4 * (gx0 + i * gdx) / P.Lw);   // EurOtop 식 5.61의 감쇠
+      let out = Math.min(d, u * h / gdx * d);
+      if (i === GX - 1) out = 0;                                    // 건물 벽에서 막힘
+      tmp[id] += d - out; if (out > 0) tmp[id + 1] += out;
+    }
+    for (let j = 0; j < GZ; j++) for (let i = 0; i < GX; i++) {   // 옆으로 퍼짐 + 배수
+      const id = j * GX + i, l = j > 0 ? tmp[id - GX] : tmp[id], r = j < GZ - 1 ? tmp[id + GX] : tmp[id];
+      const xl = i > 0 ? tmp[id - 1] : tmp[id], xr = i < GX - 1 ? tmp[id + 1] : tmp[id];
+      depth[id] = Math.max(0, tmp[id] + 0.12 * (l + r + xl + xr - 4 * tmp[id]) * h * 8 - P.drain * h);
+    }
+  }
+  flowU *= Math.exp(-dt / 2.5);
+  const pa = wGeo.attributes.position.array;
+  for (let j = 0; j < GZ; j++) for (let i = 0; i < GX; i++) {
+    const id = j * GX + i, v = id;   // PlaneGeometry 정점 순서: 행 = z, 열 = x
+    wDepth[v] = depth[id]; pa[v * 3 + 1] = baseY[v * 3 + 1] + Math.min(depth[id], 2.5);
+  }
+  wGeo.attributes.depth.needsUpdate = true; wGeo.attributes.position.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- 글자표 (겹치지 않게 배치하고 가리키는 선을 그림)
+const labelBox = document.getElementById('labels');
+const ov = document.getElementById('ov'), octx = ov.getContext('2d');
+function kmh(v) { return Math.round(v * 3.6 / 5) * 5; }   // m/s → 시속 km (5 단위)
+function mkLabel(cls) { const d = document.createElement('div'); d.className = 'lab ' + (cls || ''); labelBox.appendChild(d); return d; }
+const zoneLabels = [
+  { p: new THREE.Vector3(pw / 2, crest + 0.4, Z0 + L * 0.25), el: mkLabel(''), text: '호안 꼭대기 (색 = 위험 등급)' },
+  { p: new THREE.Vector3((walk0 + walk1) / 2, ground + 0.3, Z0 + L * 0.3), el: mkLabel(P.zone.walk_bad ? 'bad' : 'ok'),
+    text: P.zone.walk_bad ? `보행로 위험 · 물살 시속 약 ${kmh(P.zone.walk_v)} km` : '보행로 안전' },
+  { p: new THREE.Vector3((walk1 + road1) / 2, ground + 0.3, Z0 + L * 0.3), el: mkLabel(P.zone.road_bad ? 'bad' : 'ok'),
+    text: P.zone.road_bad ? '도로 위험 · 차량 통행 위험' : '도로 안전' },
+  { p: new THREE.Vector3(bld0, ground + 2.5, Z0 + L * 0.3), el: mkLabel(P.zone.bld_bad ? 'bad' : 'ok'),
+    text: P.zone.bld_bad ? '건물 앞 위험 · 침수 피해 우려' : '건물 앞 안전' },
+];
+zoneLabels.forEach(z => z.el.textContent = z.text);
+const riseLabel = { el: mkLabel('rise'), p: new THREE.Vector3(), on: false };
+const v3 = new THREE.Vector3();
+const hudIds = ['info', 'ctrl', 'event', 'note'];
+function hit(a, b) { return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h; }
+function layoutLabels() {
+  const W = canvas.clientWidth, H = canvas.clientHeight, pad = 4;
+  const blocked = hudIds.map(id => { const r = document.getElementById(id).getBoundingClientRect(); return { x: r.left - pad, y: r.top - pad, w: r.width + 2 * pad, h: r.height + 2 * pad }; });
+  const items = (riseLabel.on ? [riseLabel] : []).concat(zoneLabels);
+  if (!riseLabel.on) riseLabel.el.style.display = 'none';
+  octx.clearRect(0, 0, ov.width, ov.height);
+  const dpr = ov.width / Math.max(W, 1);
+  for (const it of items) {
+    v3.copy(it.p).project(camera);
+    const ax = (v3.x + 1) / 2 * W, ay = (1 - v3.y) / 2 * H;
+    if (v3.z > 1 || ax < 0 || ax > W || ay < 0 || ay > H) { it.el.style.display = 'none'; continue; }
+    it.el.style.display = 'block';
+    const w = it.el.offsetWidth, h = it.el.offsetHeight;
+    let placed = null;
+    for (let k = 0; k < 16 && !placed; k++) {                     // 위로 차례로 올려 보고, 안 되면 아래로
+      const dy = k < 10 ? -(18 + k * (h + 4)) : 18 + (k - 10) * (h + 4);
+      const r = { x: Math.min(Math.max(ax - w / 2, 4), W - w - 4), y: ay + dy - (dy < 0 ? h : 0), w, h };
+      if (r.y < 2 || r.y + h > H - 2) continue;
+      if (blocked.some(b => hit(r, b))) continue;
+      placed = r;
+    }
+    if (!placed) { it.el.style.display = 'none'; continue; }
+    blocked.push({ x: placed.x - 3, y: placed.y - 3, w: placed.w + 6, h: placed.h + 6 });
+    it.el.style.left = placed.x + 'px'; it.el.style.top = placed.y + 'px';
+    const ly = placed.y > ay ? placed.y : placed.y + h;
+    octx.strokeStyle = 'rgba(255,255,255,0.75)'; octx.lineWidth = 1.2 * dpr;
+    octx.beginPath(); octx.moveTo(ax * dpr, ay * dpr); octx.lineTo((placed.x + w / 2) * dpr, ly * dpr); octx.stroke();
+    octx.fillStyle = '#ffffff'; octx.beginPath(); octx.arc(ax * dpr, ay * dpr, 2.6 * dpr, 0, 7); octx.fill();
+  }
+}
+
+// ---------------------------------------------------------------- 정보창
+function fmtQ(q) { return q <= 0 ? '0' : q >= 100 ? Math.round(q).toLocaleString('ko-KR') : Number(q.toPrecision(3)).toString(); }
+document.getElementById('info').innerHTML =
+  `<div style="font-size:15px;font-weight:700;margin-bottom:4px">마린시티 호안 월파 3D</div>
+   파도 높이 <b>${P.hs.toFixed(1)} m</b> · 주기 <b>${P.tp.toFixed(0)}초</b> · 호안이 바닷물보다 <b>${P.rc.toFixed(1)} m</b> 높음<br>
+   위험 등급 <span class="g" style="background:${P.grade_color}">${P.grade_name}</span><br>
+   1시간에 파도 <b>${P.nw_h.toFixed(0)}개</b> 중 약 <b>${P.now_h.toFixed(0)}개</b>가 호안을 넘음<br>
+   <span class="muted">` + (P.rise2 > 0 ? `큰 파도는 호안 위로 약 <b>${P.rise2.toFixed(1)} m</b> 솟구침` : '파도가 호안을 넘지 못함') + `</span>`;
+document.getElementById('note').textContent =
+  'EurOtop 공식으로 계산한 높이와 물의 양을 그대로 그렸습니다 (실제 물 흐름 시뮬레이션은 아님). 파도마다 높이가 달라 일부만 넘칩니다.';
+const evBox = document.getElementById('event');
+let nOver = 0, nWaves = 0, maxRise = 0, riseUntil = 0;
+
+// ---------------------------------------------------------------- 시간 진행
+const FIXED = new URLSearchParams(location.search).has('fixed');
+let t = 0, speed = 2, playing = true, lastN = null, current = null;
+const clock = new THREE.Clock();
+function frame() {
+  const dt = (FIXED ? 1 / 30 : Math.min(clock.getDelta(), 0.05)) * (playing ? speed : 0);
+  t += dt;
+  if (P.grade_name === '위험') { gradeMat.color.copy(gradeBase).lerp(gradeHi, 0.5 + 0.5 * Math.sin(t * 4)); gradeCapMat.color.copy(gradeMat.color); }   // 위험이면 깜빡임
+  seaMat.uniforms.t.value = t; runupMat.uniforms.t.value = t; sprayMat.uniforms.uT.value = t;
+
+  // 지금 해안에 닿아 있는 파도
+  const n = Math.floor((w * t - k * xShore) / (2 * Math.PI) + 0.5);
+  const tau = t - tShore(n);
+  if (n !== lastN && tau >= 0) {
+    lastN = n; nWaves++;
+    const wv = waveOf(n);
+    current = { n, ...wv, launched: false, seed: Math.random() * 10 };
+    // 파도가 TTP·직립벽에 부딪혀 하얗게 부서지는 물보라: 그 파도가 올라가는 높이(처오름)까지
+    current.hit = false;
+    if (wv.ex > 0) {
+      nOver++;
+      current.rise = 1.05 * wv.ex;                          // v = 1.45 √(g·초과높이) → 솟구침 ≈ 1.05 × 초과높이
+      current.d50 = P.land_c + 0.533 * P.hs;                // 식 6.20, 넘친 물의 절반이 떨어지는 거리
+      maxRise = Math.max(maxRise, current.rise);
+    }
+  }
+  let level = swl;
+  if (current) {
+    const ta = t - tShore(current.n);
+    if (ta >= 0 && ta <= TR) level = swl + Math.max(current.R * Math.sin(Math.PI * ta / TR), Math.min(current.R, P.hs / 2 * HRATIO[((current.n % NW) + NW) % NW]) * (1 - ta / TR));
+    setRunup(level);
+    if (!current.hit && ta >= 0 && ta <= TR && dt > 0) {
+      const top = swl + current.R;                                         // 이 파도가 올라가는 높이
+      const atWall = top > ac;
+      const hitY = atWall ? ac : Math.max(swl, top - 0.5);
+      if (level >= hitY - 0.05 || ta > TR * 0.5) {
+        current.hit = true;
+        const strength = Math.min(1.6, 0.25 + current.R / Math.max(P.ru2, 0.1));
+        plume(atWall ? 'wall' : 'slope', hitY, Math.max(0.6, top - hitY), strength);
+      }
+    }
+    if (current.ex > 0) {
+      const tUp = TR * Math.asin(Math.min(1, (crest - swl) / current.R)) / Math.PI;   // 마루에 닿는 시각
+      const tf = (2 * current.rise / G) ** 0.5 + (2 * (current.rise + crest - ground) / G) ** 0.5;  // 비행 시간
+      const prog = Math.min(1, Math.max(0, (ta - tUp) / tf));
+      const fade = prog < 1 ? 1 : Math.max(0, 1 - (ta - tUp - tf) / 1.2);
+      setTongue(current, prog, fade);
+      if (ta >= tUp && ta <= tUp + 1.2 && dt > 0) {   // 넘치는 동안 계속 물보라
+        if (Math.random() < dt * 6) plume('wall', crest - 0.3, current.rise + 0.3, 0.3);
+      }
+      if (ta >= tUp && !current.launched) {
+        current.launched = true;
+        // 착지할 때 땅에 물을 붓고 흐름 속도를 줌
+        const volTotal = current.V * L;                     // m³ (그림에 보이는 호안 길이 L 전체)
+        const nPart = Math.min(3500, Math.round(500 + 700 * Math.sqrt(current.V)));
+        const vy = Math.sqrt(2 * G * current.rise);
+        emit(nPart, 0.3, crest, () => {
+          const dist = P.land_c - (P.hs / 1.3) * Math.log(Math.max(Math.random(), 1e-4));   // 식 6.19 낙하 거리 분포
+          const tfl = (vy + Math.sqrt(vy * vy + 2 * G * (crest - ground))) / G;
+          const sc = 0.75 + Math.random() * 0.5;
+          return [(pw + dist) / tfl, vy * sc];
+        }, 0, volTotal / nPart);
+        flowU = Math.max(flowU, 1.45 * Math.sqrt(G * current.ex));
+        riseUntil = t + 4;
+      }
+    } else setTongue(null, 0, 0);
+  }
+
+  // 입자 이동
+  if (dt > 0) updateParticles(dt);
+  if (dt > 0) stepWater(dt);
+
+  // 글자
+  riseLabel.on = !!(current && current.ex > 0 && t < riseUntil);
+  if (riseLabel.on) {
+    riseLabel.el.textContent = `↑ 호안 위로 ${current.rise.toFixed(1)} m 솟구침`;
+    riseLabel.p.set(0.5, crest + current.rise, Z0 + L * 0.6);
+  }
+  layoutLabels();
+  evBox.innerHTML = `<b>지금까지 파도 ${nWaves}개 중 ${nOver}개가 호안을 넘음</b><br>` +
+    (current ? (current.ex > 0
+      ? `이번 파도: 호안 위로 <b>${current.rise.toFixed(1)} m</b> 솟구침, 호안 1 m마다 <b>${Math.round(current.V * 1000).toLocaleString('ko-KR')} L</b>(욕조 약 ${Math.max(1, Math.round(current.V * 1000 / 200))}개) 넘어옴`
+      : `이번 파도: 호안 꼭대기보다 ${(crest - swl - current.R).toFixed(1)} m 아래에서 멈춤`) : '첫 파도를 기다리는 중') +
+    `<br><span style="color:#93a4b5">지금까지 가장 높이 솟구친 파도: ${maxRise.toFixed(1)} m</span>`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- 시점, 버튼, 크기
+const views = {
+  road: [[26, ground + 2.6, 30], [-3, ground + 4.5, -2]],
+  oblique: [[-27, 11, 33], [3, 5.5, 0]],
+  side: [[0, 8, 62], [0, 6, 0]],
+  walk: [[17, ground + 1.7, 22], [-8, ground + 3.5, -6]],
+};
+function setView(v) { camera.position.set(...views[v][0]); controls.target.set(...views[v][1]); controls.update(); }
+setView('road');
+document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { setView(b.dataset.view); document.querySelectorAll('[data-view]').forEach(x => x.classList.toggle('on', x === b)); });
+document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; document.querySelectorAll('[data-speed]').forEach(x => x.classList.toggle('on', x === b)); });
+document.getElementById('big').onclick = () => {   // 다음 64개 파도 중 가장 큰 파도 직전으로 이동
+  let best = null, bestR = -1;
+  for (let n = (lastN ?? 0) + 1; n <= (lastN ?? 0) + NW; n++) { const R = waveOf(n).R; if (R > bestR) { bestR = R; best = n; } }
+  t = tShore(best) - 4.0; lastN = best - 1; current = null;
+};
+document.getElementById('play').onclick = e => { playing = !playing; e.target.textContent = playing ? '일시정지' : '재생'; e.target.classList.toggle('on', playing); };
+function resize() {
+  const W = canvas.clientWidth, H = canvas.clientHeight; renderer.setSize(W, H, false); camera.aspect = W / H; camera.updateProjectionMatrix();
+  sprayMat.uniforms.uScale.value = H * renderer.getPixelRatio() / (2 * Math.tan(camera.fov * Math.PI / 360));
+  const dpr = Math.min(window.devicePixelRatio, 2); ov.width = W * dpr; ov.height = H * dpr;
+}
+window.addEventListener('resize', resize); resize();
+const q0 = new URLSearchParams(location.search);
+
+if (q0.get('t')) t = +q0.get('t');
+if (q0.get('speed')) speed = +q0.get('speed');
+if (q0.has('jump')) {   // 시험용: 다음으로 넘치는 큰 파도 직전으로 이동
+  const want = +(q0.get('jump') || 0);
+  for (let n = 1; n < 400; n++) { const wv = waveOf(n); if (wv.ex > want) { t = tShore(n) - (+q0.get('before') || 1.0); break; } }
+}
+if (q0.get('view')) setView(q0.get('view'));
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

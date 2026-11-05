@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>마린시티 호안 월파 단면</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1722; overflow: hidden; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }
+  #c { width: 100%; height: 100%; display: block; }
+  .hud { position: absolute; color: #e6edf3; background: rgba(15, 23, 34, .84); border: 1px solid #2a3a4d; border-radius: 8px; padding: 7px 11px; font-size: 12px; line-height: 1.5; z-index: 3; }
+  #info { left: 10px; top: 10px; max-width: 290px; }
+  #info .g { display: inline-block; padding: 0 7px; border-radius: 4px; color: #fff; font-weight: 700; }
+  #ctrl { right: 10px; top: 10px; display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; max-width: 330px; }
+  #ctrl button { background: #172231; color: #e6edf3; border: 1px solid #2a3a4d; border-radius: 5px; padding: 3px 9px; font: inherit; cursor: pointer; }
+  #ctrl button.on { background: #4fa3d9; border-color: #4fa3d9; color: #0f1722; }
+  #event { left: 10px; bottom: 10px; max-width: 360px; }
+  #note { right: 10px; bottom: 10px; font-size: 11px; color: #93a4b5; max-width: 330px; padding: 4px 9px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info" class="hud"></div>
+<div id="ctrl" class="hud">
+  <button id="play" class="on">일시정지</button>
+  <button data-speed="1">1배</button><button data-speed="2" class="on">2배</button><button data-speed="4">4배</button>
+  <button id="big">가장 큰 파도 보기</button>
+  <button id="dims">자세히 보기</button>
+</div>
+<div id="event" class="hud"></div>
+<div id="note" class="hud"></div>
+<script>
+const P = /*__PARAMS__*/;
+const G = 9.81;
+const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+const FONT = "'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif";
+
+// ---------------------------------------------------------------- 치수와 좌표 (x: 바다 − / 육지 +, 파라펫 앞면 0 · y: 표고 DL)
+const crest = P.crest, swl = P.swl, toe = P.toe, ac = P.ac, ground = P.ground, pw = P.pw, cot = P.cot;
+const B = P.berm;                                 // TTP 마루 폭 (직립벽 앞 수평 구간)
+const xToe = -B - (ac - toe) * cot;
+const walk0 = P.buffer_w + P.gap, walk1 = walk0 + P.walk_w, road1 = walk1 + P.road_w, bld0 = road1 + P.setback;
+const slopeY = x => x >= -B ? ac : ac + (x + B) / cot;   // 피복 표면 높이 (x ≤ 0)
+const xShore = -B - (ac - swl) * cot;
+const X0 = xToe - 9, X1 = bld0 + 10;
+const Y0 = toe - 1.5, Y1 = Math.max(20, crest + P.rise2 + 3.5, swl + P.ru2 + 2.5);
+let W = 1, H = 1, S = 1, OX = 0, OY = 0, DPR = 1;
+const sx = x => OX + (x - X0) * S, sy = y => OY + (Y1 - y) * S;
+
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---------------------------------------------------------------- 고정 그림 (배경, 구조물) 은 한 번 그려 두고 재사용
+let bg = null;
+function makePattern(w, h, draw) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h); return ctx.createPattern(c, 'repeat'); }
+function buildBackground() {
+  bg = document.createElement('canvas'); bg.width = canvas.width; bg.height = canvas.height;
+  const b = bg.getContext('2d'); b.scale(DPR, DPR);
+  const rnd = mulberry(11);
+  // 하늘
+  const sky = b.createLinearGradient(0, 0, 0, sy(swl));
+  sky.addColorStop(0, '#3e4b59'); sky.addColorStop(0.6, '#6f7d8b'); sky.addColorStop(1, '#93a0ac');
+  b.fillStyle = sky; b.fillRect(0, 0, W, H);
+  for (let i = 0; i < 26; i++) {           // 구름
+    const x = rnd() * W, y = rnd() * sy(swl) * 0.6, r = 40 + rnd() * 120;
+    const g = b.createRadialGradient(x, y, 0, x, y, r); g.addColorStop(0, 'rgba(210,218,226,0.22)'); g.addColorStop(1, 'rgba(210,218,226,0)');
+    b.fillStyle = g; b.beginPath(); b.ellipse(x, y, r * 1.8, r * 0.6, 0, 0, 7); b.fill();
+  }
+  // 마린시티 건물 (먼 것 → 가까운 것)
+  const towers = [[bld0 + 2, 9, 12, '#2f3c4a'], [bld0 + 15, 8, 95, '#26313d'], [bld0 + 26, 9, 140, '#2b3744'], [bld0 + 37, 7, 70, '#26313d'], [bld0 - 1, 12, 10, '#334252']];
+  for (const [x, w, h, col] of towers) {
+    const x0 = sx(x), x1 = sx(x + w), y0 = sy(ground + h), y1 = sy(ground);
+    b.fillStyle = col; b.fillRect(x0, y0, x1 - x0, y1 - y0);
+    for (let yy = y0 + 5; yy < y1 - 6; yy += Math.max(6, S * 1.4)) for (let xx = x0 + 3; xx < x1 - 4; xx += Math.max(5, S * 1.2)) {
+      const l = rnd(); b.fillStyle = l > .82 ? 'rgba(233,215,154,.85)' : l > .5 ? 'rgba(120,140,160,.5)' : 'rgba(70,88,105,.5)';
+      b.fillRect(xx, yy, Math.max(2, S * 0.6), Math.max(2, S * 0.7));
+    }
+  }
+  // 배후 땅 (단면)
+  const soil = makePattern(64, 64, (c, w, h) => { c.fillStyle = '#5d5446'; c.fillRect(0, 0, w, h); for (let i = 0; i < 160; i++) { c.fillStyle = `rgba(${rnd() > .5 ? 255 : 0},${rnd() > .5 ? 230 : 0},${rnd() > .5 ? 200 : 0},${rnd() * .08})`; c.fillRect(rnd() * w, rnd() * h, 2 + rnd() * 3, 2 + rnd() * 3); } });
+  b.fillStyle = soil; b.fillRect(sx(0), sy(ground), W - sx(0), H - sy(ground));
+  // 해저
+  b.fillStyle = '#8a7a5c'; b.fillRect(0, sy(toe), sx(0), H - sy(toe));
+  // 사석 코어
+  const stones = makePattern(48, 48, (c, w, h) => { c.fillStyle = '#6a6459'; c.fillRect(0, 0, w, h); for (let i = 0; i < 22; i++) { c.fillStyle = `hsl(35,8%,${30 + rnd() * 25}%)`; c.beginPath(); c.ellipse(rnd() * w, rnd() * h, 3 + rnd() * 5, 2 + rnd() * 4, rnd() * 3, 0, 7); c.fill(); } });
+  b.fillStyle = stones; b.beginPath(); b.moveTo(sx(xToe), sy(toe)); b.lineTo(sx(0), sy(toe)); b.lineTo(sx(0), sy(ac)); b.lineTo(sx(-B), sy(ac)); b.closePath(); b.fill();   // 기초사석 (작은 돌)
+  // 피복석 (큰 돌): TTP 바로 아래 두께 약 1.8 m 층, 빈틈 없이
+  const bigRock = makePattern(90, 90, (c, w, h) => { c.fillStyle = '#6b665d'; c.fillRect(0, 0, w, h);
+    for (let i = 0; i < 9; i++) { c.fillStyle = `hsl(35,6%,${38 + rnd() * 18}%)`; c.beginPath(); c.ellipse(rnd() * w, rnd() * h, 10 + rnd() * 10, 8 + rnd() * 8, rnd() * 3, 0, 7); c.fill();
+      c.strokeStyle = 'rgba(30,28,25,0.5)'; c.lineWidth = 1.2; c.stroke(); } });
+  const tU = 1.8, nxU = -1 / Math.hypot(1, cot) * tU, nyU = cot / Math.hypot(1, cot) * tU;
+  b.fillStyle = bigRock; b.beginPath();
+  b.moveTo(sx(xToe), sy(toe)); b.lineTo(sx(-B), sy(ac)); b.lineTo(sx(0), sy(ac)); b.lineTo(sx(0), sy(ac - tU)); b.lineTo(sx(-B - nxU * 0.6), sy(ac - tU)); b.lineTo(sx(xToe - nxU), sy(toe)); b.closePath(); b.fill();
+  // 포장면
+  const pave = (x0, x1, col) => { b.fillStyle = col; b.fillRect(sx(x0), sy(ground) - 2, sx(x1) - sx(x0), Math.max(3, S * 0.25)); };
+  pave(pw, P.buffer_w, '#9b9d9b'); pave(P.buffer_w, walk0, '#8d8f8e'); pave(walk0, walk1, '#b9bdbf'); pave(walk1, road1, '#3b3e42'); pave(road1, X1, '#9b9d9b');
+  b.fillStyle = '#a9aeaf'; b.fillRect(sx(walk1 - 0.25), sy(ground + 0.18), Math.max(2, S * 0.25), S * 0.18);   // 연석
+  for (const x of [walk0 + 0.4, road1 + 1.0]) {                                                                  // 가로등
+    b.strokeStyle = '#3a444c'; b.lineWidth = Math.max(1.5, S * 0.15);
+    b.beginPath(); b.moveTo(sx(x), sy(ground)); b.lineTo(sx(x), sy(ground + 7)); b.lineTo(sx(x + 1.6), sy(ground + 7)); b.stroke();
+  }
+  // 파라펫
+  const pg = b.createLinearGradient(sx(0), 0, sx(pw), 0); pg.addColorStop(0, '#b9c0c4'); pg.addColorStop(1, '#8e979c');
+  b.fillStyle = '#8e979c'; b.fillRect(sx(0), sy(ground), sx(10.0) - sx(0), sy(toe) - sy(ground));         // 기존 구조물 (콘크리트)
+  b.fillStyle = pg; b.fillRect(sx(0), sy(P.crest_parapet), sx(pw) - sx(0), sy(ground) - sy(P.crest_parapet));   // 2012년 방파벽 1.2 m
+  // 테트라포드 (2층, 실제 크기)
+  const H4 = P.ttp_h, arm = H4 * 0.5, sp = P.dn * 0.85;   // TTP 를 촘촘히 (빈틈 줄임)
+  const slopeLen = Math.hypot(xToe + B, ac - toe), nx = -1 / Math.hypot(1, cot), ny = cot / Math.hypot(1, cot);
+  const pts = [];
+  for (let layer = 0; layer < 2; layer++) for (let s = sp * 0.5; s < slopeLen - 0.3; s += sp * 0.85) {
+    const t = s / slopeLen, x = xToe + (-B - xToe) * t, y = toe + (ac - toe) * t, off = (layer + 0.5) * H4 * 0.42;
+    pts.push([x + nx * off + (rnd() - .5) * 0.6, y + ny * off + (rnd() - .5) * 0.5, rnd() * 6.283, layer]);
+  }
+  for (let layer = 0; layer < 2; layer++) for (let x = -B + sp * 0.5; x < -0.4; x += sp * 0.85)   // TTP 마루(수평 구간)
+    pts.push([x + (rnd() - .5) * 0.4, ac - H4 * 0.35 + layer * H4 * 0.42, rnd() * 6.283, layer]);
+  pts.sort((a, c) => a[3] - c[3]);
+  for (const [x, y, rot, layer] of pts) {
+    const cx = sx(x), cy = sy(y), shade = layer ? 200 : 170;
+    for (let k = 0; k < 4; k++) {
+      const a = rot + k * Math.PI / 2 + (k % 2) * 0.35, len = arm * S * (k === 3 ? 0.55 : 1);
+      const ex = cx + Math.cos(a) * len, ey = cy + Math.sin(a) * len, wid = H4 * 0.19 * S;
+      b.strokeStyle = `rgb(${shade},${shade - 3},${shade - 12})`; b.lineWidth = wid * 2; b.lineCap = 'round';
+      b.beginPath(); b.moveTo(cx, cy); b.lineTo(ex, ey); b.stroke();
+      b.strokeStyle = 'rgba(255,255,255,0.18)'; b.lineWidth = wid * 0.6;
+      b.beginPath(); b.moveTo(cx - wid * 0.3, cy - wid * 0.3); b.lineTo(ex - wid * 0.3, ey - wid * 0.3); b.stroke();
+    }
+    b.fillStyle = `rgb(${shade - 25},${shade - 28},${shade - 35})`; b.beginPath(); b.arc(cx, cy, H4 * 0.2 * S, 0, 7); b.fill();
+  }
+}
+
+// ---------------------------------------------------------------- 파도 (파도마다 높이가 다름, 3D 와 같은 계산)
+const NW = 64, rndW = mulberry(20261028), U = [];
+for (let i = 0; i < NW; i++) U.push(Math.max(rndW(), 1e-4));
+function waveOf(n) {
+  const u = U[((n % NW) + NW) % NW];
+  let R = P.ru2 * Math.sqrt(Math.log(u) / Math.log(0.02));     // 처오름: 레일리 분포 (EurOtop 식 6.3)
+  if (!P.overtop) R = Math.min(R, crest - swl - 0.15);
+  const ex = swl + R - crest;
+  const V = ex > 0 ? P.wa * Math.pow(-Math.log(Math.min(u / P.pov, 0.9999)), 1 / P.wb) : 0;   // m³ per m (식 6.16~6.18)
+  return { u, R, ex, V, h: Math.sqrt(-Math.log(u) / 2) };
+}
+const LV = Math.min(P.Lw, 48), kV = 2 * Math.PI / LV, wV = 2 * Math.PI / P.tm;   // 그림용 물결 (주기는 실제 평균주기)
+const tShore = n => (2 * Math.PI * n + kV * xShore) / wV;
+const TR = Math.min(0.45 * P.tm, 7);
+function seaY(x, t) {
+  const th = wV * t - kV * x, n = Math.floor(th / (2 * Math.PI) + 0.5), ph = th - n * 2 * Math.PI;
+  const a = P.hs / 2 * waveOf(n).h;
+  const near = Math.min(1, Math.max(0, 1 - (xShore - x) / 40));
+  const y = swl + a * Math.cos(ph + near * 0.9 * Math.sin(ph)) * (1 + 0.35 * near) + 0.15 * Math.sin(0.9 * x - 2.3 * t) + 0.1 * Math.sin(1.7 * x + 1.9 * t);
+  return Math.min(y, ac);   // 실제 파고 그대로 (임의로 낮추지 않음). 마루 위로 넘는 물은 물 덩어리·물보라로 따로 그림
+}
+
+// ---------------------------------------------------------------- 물보라 입자와 땅 위 흐름
+// 입자 — 0: 물 덩어리(땅에 떨어져 물이 됨) · 1: 물보라(하얗게 피어오름) · 2: 물안개
+const NP = 5000, px = new Float32Array(NP), py = new Float32Array(NP), pvx = new Float32Array(NP), pvy = new Float32Array(NP), pv = new Float32Array(NP), pl = new Float32Array(NP);
+const pty = new Uint8Array(NP), page = new Float32Array(NP), pmax = new Float32Array(NP), ps0 = new Float32Array(NP);
+let pNext = 0;
+function spawn(type, x, y, vx, vy, life, size, vol) { const i = pNext; pNext = (pNext + 1) % NP; px[i] = x; py[i] = y; pvx[i] = vx; pvy[i] = vy; pv[i] = vol || 0; pl[i] = 1; pty[i] = type; page[i] = 0; pmax[i] = life; ps0[i] = size; }
+function emit(x, y, vx, vy, vol) { spawn(vol > 0 ? 0 : 1, x, y, vx, vy, vol > 0 ? 6 : 1.8, vol > 0 ? 0.9 + Math.random() * 0.8 : 1.2 + Math.random() * 1.2, vol); }
+function plume(mode, y0, height, strength) {   // 'slope': TTP 표면을 따라 · 'wall': 직립벽 면을 타고 (시작점은 항상 물 표면)
+  const v0 = Math.sqrt(2 * G * Math.max(height, 0.3)), ux = cot / Math.hypot(1, cot), uy = 1 / Math.hypot(1, cot);
+  for (let j = 0; j < Math.round((mode === 'slope' ? 220 : 340) * strength); j++) {
+    if (mode === 'slope') { const y = y0 + (Math.random() - 0.7), x = -B - (ac - Math.min(y, ac)) * cot - P.ttp_h * 0.5, sp = v0 / uy * (0.75 + 0.25 * Math.random());
+      spawn(1, x, y + P.ttp_h * 0.8, sp * ux * 0.6, sp * uy, 1.2 + Math.random(), 1.1 + Math.random() * 1.2, 0); }
+    else spawn(1, -0.35 - Math.random() * 0.8, y0 + Math.random() * 0.6, -0.6 + Math.random() * 1.6, v0 * (0.8 + 0.2 * Math.random()), 1.3 + Math.random() * 1.1, 1.2 + Math.random() * 1.4, 0);
+  }
+  for (let j = 0; j < Math.round(60 * strength); j++) spawn(2, (mode === 'slope' ? -B - (ac - Math.min(y0, ac)) * cot : -0.6) + Math.random() * 2, y0 + Math.random() * height * 0.7, 1 + Math.random() * 2, v0 * 0.2 * Math.random(), 3 + Math.random() * 2, 2.8 + Math.random() * 2.5, 0);
+}
+const sprite = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  const gr = g.createRadialGradient(32, 26, 2, 32, 32, 32); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.55, 'rgba(236,241,244,0.85)'); gr.addColorStop(1, 'rgba(225,232,236,0)');
+  g.fillStyle = gr; g.beginPath(); g.arc(32, 32, 32, 0, 7); g.fill(); return c; })();
+const GX = 160, gx0 = pw, gx1 = bld0, gdx = (gx1 - gx0) / GX, depth = new Float32Array(GX), tmp = new Float32Array(GX);
+let flowU = 0;
+function stepWater(dt) {
+  const n = Math.max(1, Math.ceil(flowU * dt / (0.7 * gdx))), h = dt / n;
+  for (let s = 0; s < n; s++) {
+    tmp.fill(0);
+    for (let i = 0; i < GX; i++) {
+      const d = depth[i]; if (d <= 0) continue;
+      const u = flowU * Math.exp(-1.4 * (gx0 + i * gdx) / P.Lw);   // EurOtop 식 5.61 감쇠
+      let out = Math.min(d, u * h / gdx * d); if (i === GX - 1) out = 0;
+      tmp[i] += d - out; if (out > 0) tmp[i + 1] += out;
+    }
+    for (let i = 0; i < GX; i++) {
+      const l = i > 0 ? tmp[i - 1] : tmp[i], r = i < GX - 1 ? tmp[i + 1] : tmp[i];
+      depth[i] = Math.max(0, tmp[i] + 0.25 * (l + r - 2 * tmp[i]) * h * 6 - P.drain * h);
+    }
+  }
+  flowU *= Math.exp(-dt / 2.5);
+}
+
+// ---------------------------------------------------------------- 치수·표고 표시 (겹치지 않게 배치)
+function hit(a, b) { return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h; }
+function hudRects() {
+  return ['info', 'ctrl', 'event', 'note'].map(id => { const r = document.getElementById(id).getBoundingClientRect(); return { x: r.left - 4, y: r.top - 4, w: r.width + 8, h: r.height + 8 }; });
+}
+function textBox(text, size) { ctx.font = `${size}px ${FONT}`; return { w: ctx.measureText(text).width + 10, h: size + 7 }; }
+function drawTag(r, text, size, col, border) {
+  ctx.fillStyle = 'rgba(15,23,34,0.82)'; ctx.fillRect(r.x, r.y, r.w, r.h);
+  if (border) { ctx.fillStyle = border; ctx.fillRect(r.x, r.y, 3, r.h); }
+  ctx.fillStyle = col; ctx.font = `${size}px ${FONT}`; ctx.textBaseline = 'middle'; ctx.fillText(text, r.x + (border ? 7 : 5), r.y + r.h / 2 + 0.5);
+}
+function place(cands, w, h, used) {
+  for (const [x, y] of cands) { const r = { x, y, w, h }; if (r.x < 2 || r.y < 2 || r.x + w > W - 2 || r.y + h > H - 2) continue; if (used.some(u => hit(r, u))) continue; used.push(r); return r; }
+  return null;
+}
+function arrowV(x, y0, y1, col) {        // 세로 치수 화살표
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+  for (const [y, d] of [[y0, 1], [y1, -1]]) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 4, y + 7 * d * Math.sign(y1 - y0)); ctx.lineTo(x + 4, y + 7 * d * Math.sign(y1 - y0)); ctx.closePath(); ctx.fill(); }
+}
+function arrowH(x0, x1, y, col) {
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.3;
+  ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x1 - 7, y - 4); ctx.lineTo(x1 - 7, y + 4); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x0, y - 5); ctx.lineTo(x0, y + 5); ctx.stroke();
+}
+function drawDims() {
+  const used = hudRects();
+  used.push({ x: sx(-0.6), y: sy(crest) - 8, w: sx(pw + 0.6) - sx(-0.6), h: sy(ground) - sy(crest) + 14 });   // 방파벽(등급 색)은 글자로 가리지 않음
+  const RED = '#ff7b72', BLUE = '#8fd0ff', WHITE = '#e6edf3', GRADE = P.grade_color;
+  // 표고 눈금 (왼쪽)
+  ctx.font = `11px ${FONT}`; ctx.fillStyle = 'rgba(230,237,243,0.8)'; ctx.strokeStyle = 'rgba(230,237,243,0.5)'; ctx.lineWidth = 1;
+  const ax = sx(X0) + 4;
+  ctx.beginPath(); ctx.moveTo(ax, sy(Y0 + 0.5)); ctx.lineTo(ax, sy(Y1 - 0.5)); ctx.stroke();
+  for (let y = Math.ceil(Y0 + 0.5); y <= Y1 - 0.5; y += 2) {
+    ctx.beginPath(); ctx.moveTo(ax, sy(y)); ctx.lineTo(ax + 6, sy(y)); ctx.stroke();
+    const r = { x: ax + 8, y: sy(y) - 7, w: 50, h: 14 };
+    if (!used.some(u => hit(r, u))) { ctx.textBaseline = 'middle'; ctx.fillText(`DL${y >= 0 ? '+' : ''}${y}`, ax + 9, sy(y)); }
+  }
+  used.push({ x: ax, y: 0, w: 62, h: H });
+  // 수평 기준선: 정수위, 마루, 파도가 올라온 높이
+  const zr = swl + P.ru2;
+  const lines = [
+    [swl, `정수위 DL${swl >= 0 ? '+' : ''}${swl.toFixed(2)} m`, BLUE],
+    [crest, `마루 DL+${crest.toFixed(2)} m`, WHITE],
+    [zr, `큰 파도(상위 2%)가 올라온 높이 DL+${zr.toFixed(2)} m`, zr > crest ? RED : '#9fb0c0'],
+  ];
+  ctx.setLineDash([6, 5]);
+  for (const [y, , col] of lines) { ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(sx(X0) + 64, sy(y)); ctx.lineTo(sx(y === swl ? xShore : pw + 1), sy(y)); ctx.stroke(); }
+  ctx.setLineDash([]);
+  const order = lines.slice().sort((a, b) => b[0] - a[0]);
+  for (const [y, text, col] of order) {
+    const { w, h } = textBox(text, 12);
+    const cands = [];
+    for (const fx of [0.08, 0.2, 0.32, 0.45]) for (const dy of [-h - 3, 3, -2 * h - 6, h + 6]) cands.push([sx(X0 + (xShore - X0) * fx) , sy(y) + dy]);
+    const r = place(cands, w, h, used); if (r) drawTag(r, text, 12, col, col);
+  }
+  // 세로 치수: 여유고 Rc, 처오름 Ru2%, 솟구침
+  const xRc = sx(-1.2), xRu = sx(xShore - 3);
+  arrowV(xRc, sy(swl), sy(crest), WHITE);
+  { const t = `여유고 Rc ${P.rc.toFixed(2)} m`, b = textBox(t, 12); const r = place([[xRc - b.w - 6, (sy(swl) + sy(crest)) / 2 - b.h / 2], [xRc + 6, (sy(swl) + sy(crest)) / 2 - b.h / 2]], b.w, b.h, used); if (r) drawTag(r, t, 12, WHITE, WHITE); }
+  arrowV(xRu, sy(swl), sy(zr), zr > crest ? RED : '#9fb0c0');
+  { const t = `처오름 Ru2% ${P.ru2.toFixed(2)} m`, b = textBox(t, 12); const r = place([[xRu - b.w - 6, (sy(swl) + sy(zr)) / 2 - b.h / 2], [xRu - b.w - 6, sy(zr) + 4], [xRu + 6, sy(zr) + 4]], b.w, b.h, used); if (r) drawTag(r, t, 12, zr > crest ? RED : '#9fb0c0', zr > crest ? RED : '#9fb0c0'); }
+  if (P.rise2 > 0) {
+    const xr = sx(pw + 0.8);
+    arrowV(xr, sy(crest), sy(crest + P.rise2), RED);
+    const t = `솟구침 약 ${P.rise2.toFixed(1)} m (${P.v02.toFixed(0)} m/s)`, b = textBox(t, 12);
+    const r = place([[xr + 6, sy(crest + P.rise2) - 2], [xr + 6, sy(crest + P.rise2 * 0.6)], [xr - b.w - 6, sy(crest + P.rise2) - b.h - 4]], b.w, b.h, used);
+    if (r) drawTag(r, t, 12, RED, RED);
+  }
+  // 가로 치수: 넘친 물이 떨어지는 거리 (파라펫 뒤 기준)
+  if (P.overtop && P.d) {
+    const rows = [[0.5, '절반'], [0.1, '10%'], [0.01, '1%']];
+    rows.forEach(([f, name], i) => {
+      const d = P.d[String(f)], y = sy(ground) - (26 + i * 22);
+      const x0 = sx(pw), x1 = sx(Math.min(pw + d, X1 - 1));
+      arrowH(x0, x1, y, BLUE);
+      const t = `넘친 물의 ${name}가 ${d.toFixed(1)} m보다 멀리`, b = textBox(t, 11);
+      const r = place([[x1 + 6, y - b.h / 2], [x0 + 8, y - b.h - 2], [x1 - b.w, y - b.h - 2]], b.w, b.h, used);
+      if (r) drawTag(r, t, 11, BLUE, null);
+    });
+  }
+  // 구역 표시 (땅 속 띠): 기준 초과 여부
+  const zones = [
+    [walk0, walk1, '보행로', P.zone.walk_bad],
+    [walk1, road1, '도로', P.zone.road_bad],
+    [bld0 - 3, bld0, '건물 앞', P.zone.bld_bad],
+  ];
+  const zy = sy(ground) + 8;
+  for (const [x0, x1, name, bad] of zones) {
+    const col = bad === null ? '#93a4b5' : bad ? '#e5534b' : '#3fb68b';
+    ctx.fillStyle = col; ctx.globalAlpha = 0.9; ctx.fillRect(sx(x0) + 1, zy, sx(x1) - sx(x0) - 2, 4); ctx.globalAlpha = 1;
+    const t = bad === null ? name : `${name} ${bad ? '기준 초과' : '기준 이내'}`, b = textBox(t, 11);
+    const cx = (sx(x0) + sx(x1)) / 2 - b.w / 2;
+    const r = place([[cx, zy + 8], [cx, zy + 8 + b.h + 3], [cx, zy + 8 + 2 * (b.h + 3)]], b.w, b.h, used);
+    if (r) drawTag(r, t, 11, '#e6edf3', col);
+  }
+  // 단면 구성 이름표: TTP · 피복석 · 기초사석 · 기존 구조물
+  const xm = (xToe - B) / 2, ym = (toe + ac) / 2;
+  for (const [x, y, text] of [[xm + 1.5, ym + 2.2, 'TTP 16 t (2층)'], [xm + 2.5, ym - 0.6, '피복석 (큰 돌)'], [-B * 0.6, toe + (ac - toe) * 0.3, '기초사석 (작은 돌)'], [5, (toe + ground) / 2, '기존 구조물']]) {
+    const b = textBox(text, 11), r = place([[sx(x) - b.w / 2, sy(y) - b.h / 2], [sx(x) - b.w / 2, sy(y) + b.h], [sx(x) - b.w / 2, sy(y) - 2 * b.h]], b.w, b.h, used);
+    if (r) drawTag(r, text, 11, '#e6edf3', '#93a4b5');
+  }
+  if (P.overtop) {
+    const t = `큰 파도 때 보행로 ${P.zone.walk_v.toFixed(0)} m/s · 도로 ${P.zone.road_v.toFixed(0)} m/s · 물 두께 ${(P.zone.h * 100).toFixed(0)} cm`, b = textBox(t, 11);
+    const r = place([[sx(walk0), zy + 8 + 3 * 21], [sx(walk0), zy + 8 + 4 * 21], [sx(pw), zy + 8 + 3 * 21]], b.w, b.h, used);
+    if (r) drawTag(r, t, 11, '#ffe08a', '#ffe08a');
+  }
+}
+
+
+// ---------------------------------------------------------------- 쉬운 보기 (기본): 꼭 필요한 글자만
+function kmh(v) { return Math.round(v * 3.6 / 5) * 5; }
+function drawSimple() {
+  const used = hudRects();
+  used.push({ x: sx(-0.6), y: sy(crest) - 8, w: sx(pw + 0.6) - sx(-0.6), h: sy(ground) - sy(crest) + 14 });   // 방파벽(등급 색)은 글자로 가리지 않음
+  const RED = '#ff7b72', BLUE = '#8fd0ff', WHITE = '#e6edf3';
+  const zr = swl + P.ru2, over = zr > crest;
+  // 높이 선 3개
+  const lines = [[swl, '바닷물 높이', BLUE], [crest, '호안 꼭대기', WHITE], [zr, over ? '큰 파도가 올라오는 높이' : '큰 파도가 올라오는 높이 (호안보다 낮음)', over ? RED : '#9fb0c0']];
+  ctx.setLineDash([7, 5]);
+  for (const [y, , col] of lines) { ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(sx(X0), sy(y)); ctx.lineTo(sx(pw + 0.5), sy(y)); ctx.stroke(); }
+  ctx.setLineDash([]);
+  for (const [y, text, col] of lines.slice().sort((a, b) => b[0] - a[0])) {
+    const { w, h } = textBox(text, 13), cands = [];
+    for (const fx of [0.05, 0.18, 0.3, 0.42, 0.55, 0.7, 0.85]) for (const dy of [-h - 3, 3, -2 * h - 6]) cands.push([sx(X0 + (xShore - X0) * fx), sy(y) + dy]);
+    const r = place(cands, w, h, used); if (r) drawTag(r, text, 13, col, col);
+  }
+  // 솟구침
+  if (P.rise2 > 0) {
+    const xr = sx(pw + 0.8);
+    arrowV(xr, sy(crest), sy(crest + P.rise2), RED);
+    const t = `호안 위로 약 ${P.rise2.toFixed(1)} m 솟구침`, b = textBox(t, 14);
+    const r = place([[xr + 8, sy(crest + P.rise2) - 2], [xr + 8, sy(crest + P.rise2 * 0.55)], [xr - b.w - 8, sy(crest + P.rise2) - b.h - 4]], b.w, b.h, used);
+    if (r) drawTag(r, t, 14, RED, RED);
+  }
+  // 바닷물이 쏟아지는 곳
+  if (P.overtop && P.d) {
+    const d10 = P.d['0.1'], d1 = P.d['0.01'];
+    const gy = sy(ground), x0 = sx(pw), x10 = sx(Math.min(pw + d10, X1)), x1 = sx(Math.min(pw + d1, X1));
+    ctx.fillStyle = 'rgba(229,83,75,0.45)'; ctx.fillRect(x0, gy - 5, x10 - x0, 5);
+    ctx.fillStyle = 'rgba(229,83,75,0.2)'; ctx.fillRect(x10, gy - 5, Math.max(0, x1 - x10), 5);
+    const t = `바닷물이 쏟아지는 곳: 호안 뒤 약 ${Math.round(d10)} m까지 (가끔 ${Math.round(d1)} m까지)`, b = textBox(t, 13);
+    const r = place([[x0 + 4, gy - 30], [x0 + 4, gy - 54], [x0 + 4, gy - 78]], b.w, b.h, used);
+    if (r) drawTag(r, t, 13, '#ffd2cf', '#e5534b');
+  }
+  // 구역별 위험
+  const zones = [
+    [walk0, walk1, P.zone.walk_bad ? `보행로 위험 (물살 시속 약 ${kmh(P.zone.walk_v)} km)` : '보행로 안전', P.zone.walk_bad],
+    [walk1, road1, P.zone.road_bad ? '도로 위험' : '도로 안전', P.zone.road_bad],
+    [bld0 - 3, bld0, P.zone.bld_bad ? '건물 앞 위험' : '건물 앞 안전', P.zone.bld_bad],
+  ];
+  const zy = sy(ground) + 10;
+  for (const [x0, x1, text, bad] of zones) {
+    const col = bad ? '#e5534b' : '#3fb68b';
+    ctx.fillStyle = col; ctx.fillRect(sx(x0) + 1, zy - 6, sx(x1) - sx(x0) - 2, 4);
+    const b = textBox(text, 13), cx = (sx(x0) + sx(x1)) / 2 - b.w / 2;
+    const r = place([[cx, zy + 2], [cx, zy + 2 + b.h + 4], [cx, zy + 2 + 2 * (b.h + 4)]], b.w, b.h, used);
+    if (r) drawTag(r, text, 13, '#e6edf3', col);
+  }
+}
+
+// ---------------------------------------------------------------- 정보창
+function fmtQ(q) { return q <= 0 ? '0' : q >= 100 ? Math.round(q).toLocaleString('ko-KR') : Number(q.toPrecision(3)).toString(); }
+document.getElementById('info').innerHTML =
+  `<b>옆에서 본 호안</b> · 위험 등급 <span class="g" style="background:${P.grade_color}">${P.grade_name}</span><br>
+   파도 높이 <b>${P.hs.toFixed(1)} m</b> · 주기 <b>${P.tp.toFixed(0)}초</b> · 호안이 바닷물보다 <b>${P.rc.toFixed(1)} m</b> 높음<br>
+   1시간에 파도 <b>${P.nw_h.toFixed(0)}개</b> 중 약 <b>${P.now_h.toFixed(0)}개</b>가 호안을 넘음`;
+document.getElementById('note').textContent = '높이와 거리는 EurOtop 공식으로 계산한 값입니다 (물 흐름 시뮬레이션은 아님). 실제 비율 그대로 그렸습니다.';
+const evBox = document.getElementById('event');
+
+// ---------------------------------------------------------------- 그리기
+let t = 0, speed = 2, playing = true, showDims = false, lastN = null, cur = null, nW = 0, nO = 0, maxRise = 0;
+let last = performance.now();
+const FIXED = new URLSearchParams(location.search).has('fixed');
+function frame(now) {
+  const dt = (FIXED ? 1 / 30 : Math.min((now - last) / 1000, 0.05)) * (playing ? speed : 0); last = now;
+  t += dt;
+  // 파도 사건
+  const n = Math.floor((wV * t - kV * xShore) / (2 * Math.PI) + 0.5);
+  if (n !== lastN && t - tShore(n) >= 0) {
+    lastN = n; nW++; cur = { n, ...waveOf(n), launched: false };
+    cur.hit = false;
+    if (cur.ex > 0) { nO++; cur.rise = 1.05 * cur.ex; maxRise = Math.max(maxRise, cur.rise); }
+  }
+  let level = swl, ta = -1;
+  if (cur) { ta = t - tShore(cur.n); if (ta >= 0 && ta <= TR) level = swl + Math.max(cur.R * Math.sin(Math.PI * ta / TR), Math.min(cur.R, P.hs / 2 * cur.h) * (1 - ta / TR)); }
+  if (cur && !cur.hit && ta >= 0 && ta <= TR && dt > 0) {           // 처오름이 직립벽(또는 그 파도의 최고점)에 닿는 순간 물보라 기둥
+    const top = swl + cur.R, atWall = top > ac, hitY = atWall ? ac : Math.max(swl, top - 0.5);
+    if (level >= hitY - 0.05 || ta > TR * 0.5) { cur.hit = true; plume(atWall ? 'wall' : 'slope', hitY, Math.max(0.6, top - hitY), Math.min(1.6, 0.25 + cur.R / Math.max(P.ru2, 0.1))); }
+  }
+  if (cur && cur.ex > 0 && dt > 0) {
+    const tUp = TR * Math.asin(Math.min(1, (crest - swl) / cur.R)) / Math.PI;
+    if (ta >= tUp && ta <= tUp + 0.9) {
+      const vy = Math.sqrt(2 * G * cur.rise), nEmit = Math.round(10 + 22 * Math.sqrt(cur.V));
+      for (let j = 0; j < nEmit; j++) {
+        const dist = P.land_c - (P.hs / 1.3) * Math.log(Math.max(Math.random(), 1e-4));   // 식 6.19 낙하 거리 분포
+        const vyj = vy * (0.75 + 0.35 * Math.random()), tf = (vyj + Math.sqrt(vyj * vyj + 2 * G * (crest - ground))) / G;
+        emit(-0.3 + Math.random() * 0.8, crest + Math.random() * 0.4, (pw + dist) / tf, vyj, cur.V * dt / (nEmit * 0.9));   // 0.9 초 동안 나눠 뿜음
+      }
+      if (!cur.launched) { cur.launched = true; flowU = Math.max(flowU, 1.45 * Math.sqrt(G * cur.ex)); cur.vol = cur.V; }
+    }
+  }
+  // 입자 이동과 착지
+  for (let i = 0; i < NP; i++) {
+    if (pl[i] <= 0) continue;
+    page[i] += dt; if (page[i] > pmax[i]) { pl[i] = 0; continue; }
+    if (pty[i] === 0) pvy[i] -= G * dt;
+    else if (pty[i] === 1) { const dr = Math.exp(-1.1 * dt); pvx[i] = pvx[i] * dr + 3 * (1 - dr); pvy[i] = pvy[i] * dr - G * 0.75 * dt; }
+    else { const dr = Math.exp(-1.8 * dt); pvx[i] = pvx[i] * dr + 4 * (1 - dr); pvy[i] = pvy[i] * dr + 0.4 * dt; }
+    px[i] += pvx[i] * dt; py[i] += pvy[i] * dt;
+    if (pty[i] !== 0) { const fl = px[i] > 0 ? ground : swl - 3; if (py[i] < fl + 0.2) { py[i] = fl + 0.2; pvy[i] = Math.abs(pvy[i]) * 0.2; } continue; }
+    if (py[i] <= ground && px[i] > pw) { const k = Math.floor((px[i] - gx0) / gdx); if (k >= 0 && k < GX) depth[k] += pv[i] / gdx; pl[i] = 0; }
+    else if (px[i] < pw && py[i] < slopeY(Math.min(px[i], 0)) + P.ttp_h * 0.5 && pvy[i] < 0) pl[i] = 0;   // 사면이나 바다로 떨어진 물보라
+    else if (py[i] < swl - 2) pl[i] = 0;
+  }
+  if (dt > 0) stepWater(dt);
+
+  // ---- 그리기
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.drawImage(bg, 0, 0, W, H);
+  // 바다
+  const sea = ctx.createLinearGradient(0, sy(swl + P.hs), 0, sy(toe));
+  sea.addColorStop(0, '#2f6f86'); sea.addColorStop(0.5, '#174a5f'); sea.addColorStop(1, '#0d2c3b');
+  ctx.fillStyle = sea; ctx.globalAlpha = 0.78; ctx.beginPath(); ctx.moveTo(sx(X0), sy(toe));
+  const xs = []; for (let x = X0; x <= xShore; x += 0.25) xs.push(x); xs.push(xShore);
+  for (let i = 0; i < xs.length - 1; i++) { const xm = (xs[i] + xs[i + 1]) / 2; ctx.quadraticCurveTo(sx(xs[i]), sy(seaY(xs[i], t)), sx(xm), sy(seaY(xm, t))); }
+  ctx.lineTo(sx(xShore), sy(seaY(xShore, t))); ctx.lineTo(sx(xShore), sy(toe)); ctx.closePath(); ctx.fill();
+  // 사면 위의 물: 바다에서 그대로 이어져 TTP를 타고 올라감 (처오름). 따로 떠 있는 판 없음
+  const runTop = x => {
+    const sTop = slopeY(x);
+    let y = sTop - 0.6;                                              // 물이 없으면 피복 아래 (안 보임)
+    if (level > sTop) {
+      y = sTop + (level - sTop) * 0.45;                              // 앞머리로 갈수록 얇아짐
+      if (x > -1.5 && level > ac) y = Math.max(y, ac + (Math.min(level, crest) - ac) * Math.pow((x + 1.5) / 1.5, 1.5));   // 직립벽에 부딪혀 벽을 타고 오름
+    }
+    return y;
+  };
+  const xo = []; for (let x = xShore - 4; x <= 0; x += 0.2) xo.push(x);
+  const topAt = x => { const w = Math.min(1, Math.max(0, (x - (xShore - 4)) / 8)), ww = w * w * (3 - 2 * w);
+    return (1 - ww) * seaY(x, t) + ww * Math.max(runTop(x), Math.min(seaY(x, t), slopeY(x) - 0.6)); };
+  ctx.beginPath(); ctx.moveTo(sx(xo[0]), sy(slopeY(xo[0]) - 0.5));
+  for (const x of xo) ctx.lineTo(sx(x), sy(Math.max(topAt(x), slopeY(x) - 0.6)));
+  for (let i = xo.length - 1; i >= 0; i--) ctx.lineTo(sx(xo[i]), sy(slopeY(xo[i]) - 0.6));
+  ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+  // 물 표면선과 거품 (바다와 처오름이 한 줄로 이어짐)
+  ctx.strokeStyle = 'rgba(230,242,248,0.9)'; ctx.lineWidth = 2; ctx.beginPath();
+  const line = xs.filter(x => x < xShore - 4).map(x => [x, seaY(x, t)]).concat(xo.map(x => [x, topAt(x)]).filter(([x, y]) => y > slopeY(x) - 0.05));
+  line.forEach(([x, y], i) => { i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)); }); ctx.stroke();
+  for (const [x, y] of line) { const h = y - swl; if (h > P.hs * 0.3 || x > xShore - 8) { ctx.fillStyle = `rgba(240,248,252,${Math.min(0.9, 0.35 + h / P.hs)})`; ctx.fillRect(sx(x) - 1.5, sy(y) - 1.5, 4, 3 + Math.random() * 4); } }
+  // 마루 색 = 위험 등급
+  // 물보라·물안개·물 덩어리 (부드러운 덩어리 그림)
+  for (const ty of [2, 1, 0]) for (let i = 0; i < NP; i++) {
+    if (pl[i] <= 0 || pty[i] !== ty) continue;
+    const f = page[i] / pmax[i];
+    const size = (ty === 0 ? ps0[i] * (1 + 0.4 * f) : ty === 1 ? ps0[i] * (1 + 2.2 * f) : ps0[i] * (1 + 2.5 * f)) * S;
+    ctx.globalAlpha = ty === 0 ? 0.9 : ty === 1 ? 0.8 * Math.pow(1 - f, 1.3) : 0.3 * Math.pow(1 - f, 1.1);
+    ctx.drawImage(sprite, sx(px[i]) - size / 2, sy(py[i]) - size / 2, size, size);
+  }
+  ctx.globalAlpha = 1;
+  // 땅 위 물
+  ctx.fillStyle = 'rgba(110,175,205,0.8)'; ctx.beginPath(); ctx.moveTo(sx(gx0), sy(ground));
+  for (let i = 0; i < GX; i++) ctx.lineTo(sx(gx0 + (i + 0.5) * gdx), sy(ground + Math.min(depth[i], 3)));
+  ctx.lineTo(sx(gx1), sy(ground)); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(240,248,252,0.8)'; ctx.lineWidth = 1.2; ctx.beginPath();
+  for (let i = 0; i < GX; i++) { const y = sy(ground + Math.min(depth[i], 3)); i ? ctx.lineTo(sx(gx0 + (i + 0.5) * gdx), y) : ctx.moveTo(sx(gx0), y); }
+  ctx.stroke();
+
+  // 방파벽 = 위험 등급 색 (물보라 위에 그려 항상 보이게)
+  ctx.save(); ctx.shadowColor = P.grade_color; ctx.shadowBlur = P.grade_name === '위험' ? 10 + 6 * Math.sin(t * 4) : 8;   // 호안 꼭대기 = 위험 등급 색 (진하게)
+  ctx.fillStyle = P.grade_color; ctx.fillRect(sx(-0.15), sy(crest) - 2, sx(pw + 0.15) - sx(-0.15), sy(ground) - sy(crest) + 2); ctx.restore();   // 방파벽 전체를 등급 색으로
+  if (showDims) drawDims(); else drawSimple();
+  evBox.innerHTML = `<b>지금까지 파도 ${nW}개 중 ${nO}개가 호안을 넘음</b><br>` +
+    (cur ? (cur.ex > 0 ? `이번 파도: 호안 위로 <b>${cur.rise.toFixed(1)} m</b> 솟구침, 호안 1 m마다 <b>${Math.round(cur.V * 1000).toLocaleString('ko-KR')} L</b>(욕조 약 ${Math.max(1, Math.round(cur.V * 1000 / 200))}개) 넘어옴`
+                        : `이번 파도: 호안 꼭대기보다 ${(crest - swl - cur.R).toFixed(1)} m 아래에서 멈춤`) : '첫 파도를 기다리는 중') +
+    `<br><span style="color:#93a4b5">지금까지 가장 높이 솟구친 파도: ${maxRise.toFixed(1)} m</span>`;
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- 버튼, 크기
+document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; document.querySelectorAll('[data-speed]').forEach(x => x.classList.toggle('on', x === b)); });
+document.getElementById('play').onclick = e => { playing = !playing; e.target.textContent = playing ? '일시정지' : '재생'; e.target.classList.toggle('on', playing); };
+document.getElementById('dims').onclick = e => { showDims = !showDims; e.target.classList.toggle('on', showDims); };
+document.getElementById('big').onclick = () => {   // 다음 64개 파도 중 가장 큰 파도 직전으로 이동
+  let best = null, bestR = -1;
+  for (let n = (lastN ?? 0) + 1; n <= (lastN ?? 0) + NW; n++) { const R = waveOf(n).R; if (R > bestR) { bestR = R; best = n; } }
+  t = tShore(best) - 4.0; lastN = best - 1; cur = null;
+};
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2); W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  S = Math.min(W / (X1 - X0), H / (Y1 - Y0)); OX = (W - (X1 - X0) * S) / 2; OY = (H - (Y1 - Y0) * S) / 2;
+  buildBackground();
+}
+window.addEventListener('resize', resize); resize();
+const q0 = new URLSearchParams(location.search);
+if (q0.get('speed')) speed = +q0.get('speed');
+if (q0.has('jump')) { for (let n = 1; n < 400; n++) { if (waveOf(n).ex > +(q0.get('jump') || 0)) { t = tShore(n) - (+q0.get('before') || 1); break; } } }
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
