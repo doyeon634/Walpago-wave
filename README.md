@@ -9,7 +9,7 @@ AI:ON 2026 · 팀 Walpago:wave (T-2026-0038) · 박건우, 김도연, 남선우
 
 ## 시연 영상 (3분)
 
-[![시연 영상 보기](docs/images/dashboard_main.png)](youtube.com/watch?si=UGgGqyFbPfcQ5M_z&v=2mvE1hI-Nek&feature=youtu.be)
+[![시연 영상 보기](docs/images/dashboard_main.png)](https://youtu.be/2mvE1hI-Nek?si=WuCtX5KYufHhf5jP)
 
 위 그림을 누르면 YouTube 시연 영상이 열립니다.
 
